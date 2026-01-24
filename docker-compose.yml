@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  search-api:
+    build: ./api
+    container_name: lan-search-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./documents:/documents:ro
+      - search-data:/data
+    environment:
+      - WATCH_FOLDER=/documents
+      - DATA_FOLDER=/data
+      - DATABASE_PATH=/data/sqlite/metadata.db
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  web-ui:
+    build: ./ui
+    container_name: lan-search-ui
+    ports:
+      - "3000:3000"
+    depends_on:
+      search-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  search-data:
+    name: lan-search-data

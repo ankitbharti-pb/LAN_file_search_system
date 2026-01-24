@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir \"C:\\\\Users\\\\ankitbharti\\\\Desktop\\\\LAN_file_search_system\\\\api\\\\config\")",
+      "Bash(dir:*)"
+    ]
+  }
+}
