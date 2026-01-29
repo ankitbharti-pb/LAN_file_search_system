@@ -49,6 +49,20 @@ class Chunk(BaseModel):
         default=None, description="Similarity score with previous chunk (for detecting topic shifts)"
     )
 
+    # Cross-chunk context fields
+    prev_chunk_id: str | None = Field(
+        default=None, description="Previous chunk ID for context continuity"
+    )
+    next_chunk_id: str | None = Field(
+        default=None, description="Next chunk ID for context continuity"
+    )
+    prev_chunk_summary: str | None = Field(
+        default=None, description="Summary of previous chunk for context (first ~100 chars)"
+    )
+    next_chunk_summary: str | None = Field(
+        default=None, description="Summary of next chunk for context (first ~100 chars)"
+    )
+
 
 class ChunkWithScore(BaseModel):
     """Chunk with search relevance score."""

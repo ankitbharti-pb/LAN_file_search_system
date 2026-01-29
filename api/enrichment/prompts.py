@@ -8,7 +8,7 @@ DOCUMENT_ENRICHMENT_PROMPT = """Analyze this document and return a JSON object w
 
 ```json
 {{
-  "document_type": "string - What type of document is this? (e.g., invoice, contract, report, policy, data_file, presentation, manual, letter, memo, form)",
+  "document_type": "string - What type of document is this? Choose from: policy_wording, endorsement, certificate_of_insurance, claim_form, underwriting_guide, premium_schedule, coverage_summary, process_document, announcement, training_material, compliance_document, regulatory_filing, agent_communication, customer_correspondence, renewal_notice, cancellation_notice, audit_report, risk_assessment, loss_run_report, policy_application, or other if none apply",
   "summary": "string - A 2-3 sentence summary of the document's main purpose and content",
   "entities": {{
     "key": "value pairs of ALL important information extracted from the document. Adapt to the document type - extract what's relevant for THIS specific document. Examples: dates, names, amounts, products, terms, metrics, etc."
@@ -32,7 +32,7 @@ TABULAR_ENRICHMENT_PROMPT = """Analyze this tabular data file and return a JSON 
 
 ```json
 {{
-  "document_type": "string - Type of data (e.g., sales_data, financial_report, inventory, customer_list, log_file, survey_results)",
+  "document_type": "string - Type of data (e.g., premium_data, claims_data, policy_list, loss_run_report, commission_report, renewal_schedule, coverage_matrix, risk_analysis, underwriting_data, agent_performance, or other if none apply)",
   "summary": "string - A 2-3 sentence summary describing what this data contains and its purpose",
   "entities": {{
     "data_columns": "list of column names",

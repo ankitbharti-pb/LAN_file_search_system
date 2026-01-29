@@ -34,17 +34,31 @@ Return a JSON object with these exact fields:
   "summary": "1-2 sentence summary of the key information in this chunk",
   "keywords": ["keyword1", "keyword2", ...],  // 5-10 relevant keywords/phrases
   "entities": {{
-    "people": [],        // Names of people mentioned
-    "organizations": [], // Company/org names
-    "dates": [],         // Dates mentioned
-    "amounts": [],       // Monetary amounts or numbers
-    "locations": []      // Places mentioned
+    "policy_numbers": [],    // Policy numbers mentioned (e.g., POL-123456)
+    "claim_numbers": [],     // Claim reference numbers
+    "insured_names": [],     // Names of insured parties/policyholders
+    "coverage_types": [],    // Types of coverage (liability, property, auto, etc.)
+    "premium_amounts": [],   // Premium amounts and payment terms
+    "deductibles": [],       // Deductible amounts
+    "coverage_limits": [],   // Coverage limits and sublimits
+    "effective_dates": [],   // Policy effective dates
+    "expiration_dates": [],  // Policy expiration dates
+    "agents": [],            // Agent or broker names
+    "carriers": [],          // Insurance carrier/company names
+    "risk_types": [],        // Types of risks (property, casualty, marine, etc.)
+    "locations": [],         // Covered locations or addresses
+    "exclusions": [],        // Key exclusions mentioned
+    "conditions": []         // Important policy conditions
   }},
   "category": "definition|procedure|data|narrative|example|reference",  // Choose one
-  "questions": [         // 3-5 hypothetical questions this chunk answers
-    "What is...?",
-    "How does...?",
-    ...
+  "questions": [         // 5 hypothetical questions this chunk answers
+    // IMPORTANT: Include the document name '{file_name}' in your questions to make them specific
+    // Format: "What is [topic] in [document_name]?" or "How does [process] work according to [document_name]?"
+    // Examples:
+    //   - "What deductible applies in {file_name}?"
+    //   - "What are the coverage limits in {file_name}?"
+    //   - "How do I file a claim according to {file_name}?"
+    // Generate 5 natural questions someone would search to find this content
   ],
   "contextual_description": "2-3 sentences explaining what role this chunk plays in the document and what someone searching for this content might be looking for"
 }}
@@ -219,7 +233,13 @@ class ChunkEnricher:
             return {}
 
         normalized = {}
-        valid_keys = ["people", "organizations", "dates", "amounts", "locations"]
+        # Insurance-specific entity keys
+        valid_keys = [
+            "policy_numbers", "claim_numbers", "insured_names", "coverage_types",
+            "premium_amounts", "deductibles", "coverage_limits", "effective_dates",
+            "expiration_dates", "agents", "carriers", "risk_types", "locations",
+            "exclusions", "conditions"
+        ]
 
         for key in valid_keys:
             if key in entities and isinstance(entities[key], list):

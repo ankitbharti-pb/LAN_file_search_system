@@ -128,6 +128,9 @@ class Chunker:
                 )
             )
 
+        # Establish cross-chunk links
+        self._establish_chunk_links(chunks)
+
         return chunks
 
     def chunk_tabular(
@@ -255,12 +258,16 @@ class Chunker:
                 )
                 chunk_index += 1
 
+        # Establish cross-chunk links
+        self._establish_chunk_links(chunks)
+
         return chunks
 
     def _split_text(self, text: str) -> list[str]:
-        """Split text into chunks respecting sentence boundaries."""
+        """Split text into chunks with overlap, respecting sentence boundaries."""
         chunks = []
         current_chunk = ""
+        overlap_text = ""  # Text to prepend from previous chunk
 
         # Split by paragraphs first
         paragraphs = text.split("\n\n")
@@ -270,22 +277,74 @@ class Chunker:
             if not para:
                 continue
 
+            # If starting a new chunk, prepend overlap from previous chunk
+            if not current_chunk and overlap_text and self.chunk_overlap > 0:
+                current_chunk = overlap_text + "\n\n"
+
             if len(current_chunk) + len(para) <= self.chunk_size:
                 current_chunk += para + "\n\n"
             else:
                 if current_chunk:
                     chunks.append(current_chunk.strip())
+                    # Extract overlap for next chunk
+                    overlap_text = self._extract_overlap(current_chunk.strip())
+
                 if len(para) > self.chunk_size:
                     # Split long paragraphs by sentences
-                    chunks.extend(self._split_long_paragraph(para))
+                    long_para_chunks = self._split_long_paragraph(para)
+                    for i, lpc in enumerate(long_para_chunks):
+                        if i == 0 and overlap_text and self.chunk_overlap > 0:
+                            # Prepend overlap to first chunk of split paragraph
+                            chunks.append((overlap_text + "\n\n" + lpc).strip())
+                        else:
+                            chunks.append(lpc)
+                        # Update overlap for next chunk
+                        overlap_text = self._extract_overlap(lpc)
                     current_chunk = ""
                 else:
-                    current_chunk = para + "\n\n"
+                    # Start new chunk with overlap + current paragraph
+                    if overlap_text and self.chunk_overlap > 0:
+                        current_chunk = overlap_text + "\n\n" + para + "\n\n"
+                    else:
+                        current_chunk = para + "\n\n"
 
         if current_chunk.strip():
             chunks.append(current_chunk.strip())
 
         return chunks
+
+    def _extract_overlap(self, text: str) -> str:
+        """Extract overlap text from end of chunk, respecting sentence boundaries.
+
+        Args:
+            text: The chunk text to extract overlap from
+
+        Returns:
+            Overlap text (up to chunk_overlap chars, at sentence boundary)
+        """
+        if not text or self.chunk_overlap <= 0:
+            return ""
+
+        if len(text) <= self.chunk_overlap:
+            return text
+
+        # Get last N characters
+        overlap_region = text[-self.chunk_overlap:]
+
+        # Try to find a sentence boundary (. ! ? followed by space)
+        for i, char in enumerate(overlap_region):
+            if char in '.!?' and i < len(overlap_region) - 1:
+                if i + 1 < len(overlap_region) and overlap_region[i + 1] in ' \n':
+                    # Start from after this sentence boundary
+                    return overlap_region[i + 2:].strip()
+
+        # Fallback: find word boundary (first space)
+        space_idx = overlap_region.find(' ')
+        if space_idx > 0 and space_idx < len(overlap_region) - 10:
+            return overlap_region[space_idx + 1:].strip()
+
+        # Last resort: return the whole overlap region
+        return overlap_region.strip()
 
     def _split_long_paragraph(self, text: str) -> list[str]:
         """Split a long paragraph by sentences."""
@@ -318,8 +377,22 @@ class Chunker:
         doc_type: str,
         heading_path: str,
         entities: dict[str, Any],
+        prev_summary: str | None = None,
+        next_summary: str | None = None,
     ) -> str:
-        """Build context prefix for a chunk."""
+        """Build context prefix for a chunk including cross-chunk context.
+
+        Args:
+            file_name: Name of the document file
+            doc_type: Detected document type
+            heading_path: Section hierarchy path
+            entities: Document-level entities
+            prev_summary: Summary of previous chunk for context
+            next_summary: Summary of next chunk for context
+
+        Returns:
+            Context string to prepend to chunk text
+        """
         lines = [
             f"Document: {file_name}",
             f"Type: {doc_type}",
@@ -333,7 +406,38 @@ class Chunker:
             if entity_strs:
                 lines.append(f"Key info: {', '.join(entity_strs)}")
 
+        # Add cross-chunk context if enabled
+        if settings.enable_chunk_links:
+            if prev_summary:
+                lines.append(f"Previous context: {prev_summary}")
+            if next_summary:
+                lines.append(f"Following context: {next_summary}")
+
         return "\n".join(lines)
+
+    def _establish_chunk_links(self, chunks: list[Chunk]) -> None:
+        """Establish cross-chunk links and context summaries.
+
+        Args:
+            chunks: List of chunks to link together
+        """
+        if not settings.enable_chunk_links or len(chunks) < 2:
+            return
+
+        for i, chunk in enumerate(chunks):
+            # Set previous chunk reference
+            if i > 0:
+                chunk.prev_chunk_id = chunks[i - 1].id
+                # Extract first ~100 chars as summary
+                prev_text = chunks[i - 1].text
+                chunk.prev_chunk_summary = prev_text[:100] + "..." if len(prev_text) > 100 else prev_text
+
+            # Set next chunk reference
+            if i < len(chunks) - 1:
+                chunk.next_chunk_id = chunks[i + 1].id
+                # Extract first ~100 chars as summary
+                next_text = chunks[i + 1].text
+                chunk.next_chunk_summary = next_text[:100] + "..." if len(next_text) > 100 else next_text
 
     def _detect_heading(
         self, text: str, headings: list[HeadingInfo]

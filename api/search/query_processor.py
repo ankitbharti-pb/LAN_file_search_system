@@ -24,14 +24,21 @@ class QueryIntent:
 class QueryProcessor:
     """Processes and understands search queries."""
 
-    # Keywords that suggest specific document types
+    # Keywords that suggest specific document types (insurance domain)
     DOC_TYPE_KEYWORDS = {
-        "invoice": ["invoice", "bill", "payment", "amount due"],
-        "contract": ["contract", "agreement", "terms", "signed"],
-        "report": ["report", "analysis", "findings", "summary"],
-        "policy": ["policy", "procedure", "guideline", "rule"],
-        "data": ["data", "spreadsheet", "csv", "excel", "table"],
-        "presentation": ["presentation", "slides", "ppt", "deck"],
+        "policy_wording": ["policy wording", "policy document", "terms and conditions", "coverage terms", "policy terms", "wording"],
+        "endorsement": ["endorsement", "amendment", "rider", "addendum", "policy change", "modification"],
+        "certificate": ["certificate", "coi", "certificate of insurance", "proof of insurance", "cert"],
+        "claim": ["claim", "claim form", "loss notice", "incident report", "claim submission", "fnol"],
+        "underwriting": ["underwriting", "risk assessment", "underwriting guide", "risk evaluation", "uw guide"],
+        "premium": ["premium", "rate", "pricing", "premium schedule", "rate sheet", "quote"],
+        "process": ["process", "procedure", "workflow", "how to", "step by step", "sop", "guide"],
+        "announcement": ["announcement", "update", "news", "bulletin", "notice", "memo"],
+        "compliance": ["compliance", "regulatory", "audit", "regulation", "requirement", "filing"],
+        "renewal": ["renewal", "renew", "expiration", "policy renewal", "renewal notice"],
+        "cancellation": ["cancel", "cancellation", "termination", "policy cancellation", "non-renewal"],
+        "coverage": ["coverage", "coverage summary", "declarations", "dec page", "limits"],
+        "training": ["training", "onboarding", "education", "learning", "course"],
     }
 
     # Keywords that suggest need for synthesis

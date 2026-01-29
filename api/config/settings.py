@@ -57,7 +57,8 @@ class Settings(BaseSettings):
     chunk_overlap: int = 200  # 13% overlap
     max_chunk_size: int = 2500  # Allow larger semantic chunks
     enable_semantic_chunking: bool = True
-    semantic_similarity_threshold: float = 0.80  # Higher threshold for cleaner splits
+    semantic_similarity_threshold: float = 0.72  # Lowered from 0.80 for better topic detection
+    enable_chunk_links: bool = True  # Enable cross-chunk context linking
 
     # Cache Configuration
     cache_ttl_seconds: int = 3600
@@ -66,15 +67,39 @@ class Settings(BaseSettings):
 
     # Search Configuration
     search_top_k: int = 10
-    hybrid_alpha: float = 0.5  # Weight for vector vs keyword search (legacy)
+
+    # RRF (Reciprocal Rank Fusion) Configuration
+    rrf_k_constant: int = 30  # Lower value = better discrimination (was 60)
 
     # HyDE Query Expansion (improves retrieval for complex queries)
     enable_hyde: bool = True
     hyde_num_hypotheticals: int = 1  # Number of hypothetical documents to generate
+    hyde_alpha: float = 0.5  # Default alpha for HyDE embedding blending
+    hyde_alpha_min: float = 0.3  # Minimum alpha for adaptive HyDE
+    hyde_alpha_max: float = 0.6  # Maximum alpha for adaptive HyDE
+    hyde_adaptive: bool = True  # Enable adaptive alpha based on query characteristics
+
+    # Re-ranking Configuration
+    reranker_enabled: bool = False  # Enable cross-encoder re-ranking
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    reranker_top_k: int = 20  # Number of results to re-rank
+    reranker_blend_ratio: float = 0.7  # 70% reranker + 30% original score
+
+    # MMR (Maximum Marginal Relevance) Configuration
+    mmr_enabled: bool = False  # Enable diversity-aware ranking
+    mmr_lambda: float = 0.7  # 0.7 = 70% relevance, 30% diversity
+
+    # BM25 Configuration
+    bm25_expand_synonyms: bool = True  # Enable domain-specific synonym expansion
+    bm25_min_token_length: int = 2  # Minimum token length for indexing
+
+    # Query Processing Configuration
+    query_expand_synonyms: bool = True  # Enable query synonym expansion
+    query_spell_check: bool = False  # Optional spell correction
 
     # Enrichment Configuration
     enrichment_batch_size: int = 5
-    questions_per_chunk: int = 3
+    questions_per_chunk: int = 5  # Increased from 3 for better coverage
 
     # Multi-Vector Retrieval Weights (tuned for better embedding model)
     multi_vector_weights_main: float = 0.40  # Increased - better embeddings
@@ -139,6 +164,75 @@ class Settings(BaseSettings):
             "bm25": self.multi_vector_weights_bm25,
             "summary_vector": self.multi_vector_weights_summary,
         }
+
+    @property
+    def weight_profile_factual(self) -> dict[str, float]:
+        """Weight profile optimized for factual/exact match queries.
+
+        Higher BM25 weight for exact keyword matches.
+        """
+        return {
+            "main_vector": 0.35,
+            "bm25": 0.35,  # Higher for exact matches
+            "question_vector": 0.20,
+            "summary_vector": 0.10,
+        }
+
+    @property
+    def weight_profile_exploratory(self) -> dict[str, float]:
+        """Weight profile optimized for exploratory/semantic queries.
+
+        Higher main_vector weight for semantic understanding.
+        """
+        return {
+            "main_vector": 0.45,  # Higher semantic weight
+            "bm25": 0.15,
+            "question_vector": 0.25,
+            "summary_vector": 0.15,
+        }
+
+    @property
+    def weight_profile_comparative(self) -> dict[str, float]:
+        """Weight profile for comparative queries (vs, compare, difference).
+
+        Balanced approach with emphasis on question vectors.
+        """
+        return {
+            "main_vector": 0.35,
+            "bm25": 0.20,
+            "question_vector": 0.30,  # Higher for question matching
+            "summary_vector": 0.15,
+        }
+
+    @property
+    def weight_profile_aggregation(self) -> dict[str, float]:
+        """Weight profile for aggregation queries (total, sum, count).
+
+        Higher emphasis on structured data matching.
+        """
+        return {
+            "main_vector": 0.30,
+            "bm25": 0.30,
+            "question_vector": 0.20,
+            "summary_vector": 0.20,  # Higher for overview content
+        }
+
+    def get_weight_profile(self, query_type: str) -> dict[str, float]:
+        """Get weight profile based on query type.
+
+        Args:
+            query_type: One of 'factual', 'exploratory', 'comparative', 'aggregation'
+
+        Returns:
+            Weight dictionary for the specified query type
+        """
+        profiles = {
+            "factual": self.weight_profile_factual,
+            "exploratory": self.weight_profile_exploratory,
+            "comparative": self.weight_profile_comparative,
+            "aggregation": self.weight_profile_aggregation,
+        }
+        return profiles.get(query_type, self.multi_vector_weights)
 
 
 # Global settings instance

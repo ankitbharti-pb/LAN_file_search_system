@@ -1,6 +1,5 @@
 """File management endpoints for browsing, uploading, and managing files."""
 
-import hashlib
 import logging
 import os
 import shutil
@@ -12,8 +11,11 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import FileResponse
 
 from config.settings import settings
+from core.utils import generate_document_id, compute_file_hash
 from parsers import parser_registry
 from indexing.metadata_store import metadata_store
+from indexing.keyword_index import keyword_index
+from indexing.multi_vector_index import multi_vector_index
 from api.schemas import (
     FolderItem,
     FolderContents,
@@ -74,21 +76,6 @@ def _get_file_type(file_path: Path) -> str:
     return file_path.suffix.lower().lstrip(".")
 
 
-def _generate_document_id(file_path: Path) -> str:
-    """Generate a unique document ID from file path."""
-    path_str = str(file_path.absolute())
-    return hashlib.sha256(path_str.encode()).hexdigest()[:32]
-
-
-def _compute_file_hash(file_path: Path) -> str:
-    """Compute SHA256 hash of file content."""
-    sha256 = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            sha256.update(chunk)
-    return sha256.hexdigest()
-
-
 @router.get("/browse", response_model=FolderContents)
 @router.get("/browse/{path:path}", response_model=FolderContents)
 async def browse_folder(path: str = "") -> FolderContents:
@@ -129,7 +116,7 @@ async def browse_folder(path: str = "") -> FolderContents:
                     is_supported = parser_registry.is_supported(entry)
 
                     # Get document record if exists
-                    doc_id = _generate_document_id(entry)
+                    doc_id = generate_document_id(entry)
                     doc = await metadata_store.get_document(doc_id)
                     is_indexed = doc is not None and doc.processing_status == "indexed"
                     processing_status = doc.processing_status if doc else None
@@ -267,8 +254,8 @@ async def upload_files(
 
             # Register document in pending status for manual processing
             if parser_registry.is_supported(dest_path):
-                doc_id = _generate_document_id(dest_path)
-                file_hash = _compute_file_hash(dest_path)
+                doc_id = generate_document_id(dest_path)
+                file_hash = compute_file_hash(dest_path)
                 await metadata_store.create_pending_document(
                     document_id=doc_id,
                     file_path=str(dest_path.absolute()),
@@ -334,7 +321,7 @@ async def preview_file(path: str) -> FilePreview:
     file_type = _get_file_type(file_path)
 
     # Get document record if exists
-    doc_id = _generate_document_id(file_path)
+    doc_id = generate_document_id(file_path)
     doc = await metadata_store.get_document(doc_id)
     is_indexed = doc is not None and doc.processing_status == "indexed"
     processing_status = doc.processing_status if doc else None
@@ -420,17 +407,28 @@ async def delete_file(path: str) -> DeleteResponse:
     rel_path = _get_relative_path(file_path)
 
     # Get document record if exists
-    doc_id = _generate_document_id(file_path)
+    doc_id = generate_document_id(file_path)
     doc = await metadata_store.get_document(doc_id)
     was_indexed = doc is not None and doc.processing_status == "indexed"
 
     try:
         # Clean up document data if exists
         if doc:
+            # Get chunks BEFORE deleting from database
+            chunks = await metadata_store.get_chunks_by_document(doc_id)
+            chunk_ids = [c.id for c in chunks]
+
+            # Clean up vector indices
+            if chunk_ids:
+                keyword_index.remove(chunk_ids)
+                for chunk_id in chunk_ids:
+                    multi_vector_index.remove_chunk(chunk_id)
+                logger.info(f"Removed {len(chunk_ids)} chunks from indices")
+
             # Delete page records
             await metadata_store.delete_pages(doc_id)
 
-            # Delete chunks if indexed
+            # Delete chunks from database
             await metadata_store.delete_chunks_by_document(doc_id)
 
             # Delete document record
@@ -492,7 +490,7 @@ async def delete_folder(path: str, force: bool = Query(default=False)) -> Delete
             # Clean up document data for all files in folder
             for item in folder_path.rglob("*"):
                 if item.is_file() and parser_registry.is_supported(item):
-                    doc_id = _generate_document_id(item)
+                    doc_id = generate_document_id(item)
                     doc = await metadata_store.get_document(doc_id)
                     if doc:
                         await metadata_store.delete_pages(doc_id)

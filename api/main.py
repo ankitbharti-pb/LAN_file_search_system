@@ -18,7 +18,6 @@ from api.routes import (
     chunking_router,
 )
 from indexing.metadata_store import metadata_store
-from indexing.vector_index import vector_index
 from indexing.keyword_index import keyword_index
 from indexing.multi_vector_index import multi_vector_index
 from search.semantic_cache import semantic_cache
@@ -42,7 +41,6 @@ async def lifespan(app: FastAPI):
     logger.info("Database initialized")
 
     # Load indexes
-    vector_index.load()
     keyword_index.load()
     multi_vector_index.load()
     semantic_cache.load()
@@ -52,9 +50,11 @@ async def lifespan(app: FastAPI):
     logger.info("Preloading ML models...")
     from processing.layout_detector import layout_detector
     from indexing.embedder import embedder
+    from search.reranker import reranker
 
     _ = layout_detector.model  # Load DocLayout-YOLO
     _ = embedder.model         # Load embedding model
+    _ = reranker.model         # Load cross-encoder model
     logger.info("ML models preloaded successfully")
 
     # Create watch folder if it doesn't exist
@@ -69,7 +69,6 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down LAN File Search System")
 
     # Save indexes
-    vector_index.save()
     keyword_index.save()
     multi_vector_index.save()
     semantic_cache.save()

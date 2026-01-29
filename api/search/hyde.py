@@ -113,6 +113,35 @@ class HyDEQueryExpander:
 
         return combined
 
+    def _calculate_adaptive_alpha(self, query: str) -> float:
+        """Calculate alpha based on query characteristics.
+
+        Short, simple queries should trust the original query more.
+        Longer, complex queries benefit more from hypothetical documents.
+
+        Args:
+            query: The user's search query
+
+        Returns:
+            Alpha value between hyde_alpha_min and hyde_alpha_max
+        """
+        query_words = len(query.split())
+
+        # Short factual queries (1-3 words): trust query more
+        if query_words <= 3:
+            return settings.hyde_alpha_min
+
+        # Question queries with clear intent (4-8 words with '?')
+        if query.endswith('?') and query_words <= 8:
+            return (settings.hyde_alpha_min + settings.hyde_alpha_max) / 2
+
+        # Medium complexity (4-10 words)
+        if query_words <= 10:
+            return settings.hyde_alpha_max * 0.8
+
+        # Complex queries (10+ words): trust hypothetical more
+        return settings.hyde_alpha_max
+
     async def expand_query(self, query: str) -> tuple[np.ndarray, Optional[str]]:
         """Expand a query using HyDE and return the enhanced embedding.
 
@@ -129,9 +158,15 @@ class HyDEQueryExpander:
         hypothetical = await self.generate_hypothetical(query)
 
         if hypothetical:
+            # Calculate alpha - adaptive or fixed based on settings
+            if settings.hyde_adaptive:
+                alpha = self._calculate_adaptive_alpha(query)
+            else:
+                alpha = settings.hyde_alpha
+
             # Use weighted combination of query and hypothetical
-            embedding = self.get_hyde_embedding(query, hypothetical, alpha=0.6)
-            logger.debug("Using HyDE-enhanced query embedding")
+            embedding = self.get_hyde_embedding(query, hypothetical, alpha=alpha)
+            logger.debug(f"Using HyDE-enhanced query embedding (alpha={alpha:.2f})")
             return embedding, hypothetical
         else:
             # Fall back to regular query embedding

@@ -61,7 +61,10 @@ export interface Stats {
   total_chunks: number
   documents_by_detected_type: Record<string, number>
   documents_by_file_type: Record<string, number>
-  vector_index_size: number
+  // Multi-vector index stats
+  main_vectors: number
+  summary_vectors: number
+  question_vectors: number
   keyword_index_size: number
   cache_entries: number
 }

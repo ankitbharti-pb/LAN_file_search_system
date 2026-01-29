@@ -13,8 +13,27 @@ export default function StatsPanel({ stats }: StatsPanelProps) {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         <StatCard label="Documents" value={stats.total_documents} />
         <StatCard label="Chunks" value={stats.total_chunks} />
-        <StatCard label="Vector Index" value={stats.vector_index_size} />
+        <StatCard label="Main Vectors" value={stats.main_vectors} />
         <StatCard label="Cache Entries" value={stats.cache_entries} />
+      </div>
+
+      {/* Multi-Vector Index Stats */}
+      <div className="mb-6">
+        <h3 className="text-sm font-medium text-gray-700 mb-3">Multi-Vector Index</h3>
+        <div className="grid grid-cols-3 gap-4">
+          <div className="bg-blue-50 rounded-lg p-3 text-center">
+            <p className="text-xs text-blue-600">Main</p>
+            <p className="text-lg font-bold text-blue-900">{stats.main_vectors.toLocaleString()}</p>
+          </div>
+          <div className="bg-green-50 rounded-lg p-3 text-center">
+            <p className="text-xs text-green-600">Summary</p>
+            <p className="text-lg font-bold text-green-900">{stats.summary_vectors.toLocaleString()}</p>
+          </div>
+          <div className="bg-purple-50 rounded-lg p-3 text-center">
+            <p className="text-xs text-purple-600">Question</p>
+            <p className="text-lg font-bold text-purple-900">{stats.question_vectors.toLocaleString()}</p>
+          </div>
+        </div>
       </div>
 
       {/* Breakdown */}

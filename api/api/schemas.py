@@ -25,7 +25,10 @@ class StatsResponse(BaseModel):
     total_chunks: int
     documents_by_detected_type: dict[str, int]
     documents_by_file_type: dict[str, int]
-    vector_index_size: int
+    # Multi-vector index stats
+    main_vectors: int
+    summary_vectors: int
+    question_vectors: int
     keyword_index_size: int
     cache_entries: int
 

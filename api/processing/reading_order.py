@@ -811,23 +811,6 @@ class XYCutPlusPlusDetector:
         return result
 
 
-# Backward compatibility: Keep the old class name as an alias
-class ReadingOrderDetector(XYCutPlusPlusDetector):
-    """Alias for backward compatibility."""
-
-    def __init__(
-        self,
-        min_gap_ratio: float = 0.02,
-        spanning_threshold: float = 0.7,
-        caption_distance_threshold: float = 100,
-    ):
-        config = XYCutPlusPlusConfig(
-            min_gap_ratio=min_gap_ratio,
-            caption_distance_threshold=caption_distance_threshold,
-        )
-        super().__init__(config)
-
-
 def sort_detections_by_reading_order(
     detections: list,
     page_width: int,

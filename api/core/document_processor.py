@@ -1,11 +1,11 @@
 """Document processor that orchestrates parsing, enrichment, and indexing."""
 
-import hashlib
 import logging
 from datetime import datetime
 from pathlib import Path
 
 from config.settings import settings
+from core.utils import generate_document_id, compute_file_hash
 from models.document import Document
 from models.chunk import VectorEmbedding
 from parsers import parser_registry
@@ -13,7 +13,6 @@ from parsers.base import ParseResult
 from enrichment import entity_extractor
 from indexing.chunker import chunker
 from indexing.embedder import embedder
-from indexing.vector_index import vector_index
 from indexing.keyword_index import keyword_index
 from indexing.metadata_store import metadata_store
 from indexing.multi_vector_index import multi_vector_index
@@ -48,8 +47,8 @@ class DocumentProcessor:
 
         try:
             # Generate document ID and check for changes
-            document_id = self._generate_document_id(file_path)
-            file_hash = self._compute_file_hash(file_path)
+            document_id = generate_document_id(file_path)
+            file_hash = compute_file_hash(file_path)
 
             # Check if already indexed with same hash
             existing = await metadata_store.get_document(document_id)
@@ -116,28 +115,68 @@ class DocumentProcessor:
                 logger.warning(f"No chunks created for: {file_path}")
                 return None
 
-            # Step 5: Embed chunks
-            logger.debug(f"Embedding {len(chunks)} chunks")
-            contextualized_texts = [c.contextualized_text for c in chunks]
-            embeddings = embedder.embed_batch(contextualized_texts)
-
-            # Step 6: Index in vector store
-            logger.debug("Indexing in vector store")
-            chunk_ids = [c.id for c in chunks]
-            vector_index.add_batch(chunk_ids, embeddings)
-
-            # Step 7: Index in keyword store
-            logger.debug("Indexing in keyword store")
-            keyword_index.add_batch(chunk_ids, contextualized_texts)
-
-            # Step 8: Store metadata
+            # Step 5: Store metadata first
             logger.debug("Storing metadata")
             await metadata_store.add_document(document)
             await metadata_store.add_chunks(chunks)
 
+            # Step 6: Enrich chunks with summaries and questions
+            logger.debug(f"Enriching {len(chunks)} chunks with LLM")
+            doc_context = {
+                "file_name": file_path.name,
+                "detected_doc_type": enrichment.document_type,
+                "summary": enrichment.summary,
+            }
+
+            try:
+                enrichment_results = await chunk_enricher.enrich_batch(chunks, doc_context)
+                for (metadata, questions), chunk in zip(enrichment_results, chunks):
+                    if metadata:
+                        await metadata_store.add_chunk_metadata(metadata)
+                    if questions:
+                        await metadata_store.add_chunk_questions(chunk.id, questions)
+            except Exception as e:
+                logger.warning(f"Chunk enrichment failed, continuing without: {e}")
+                enrichment_results = [(None, []) for _ in chunks]
+
+            # Step 7: Index in multi-vector store
+            logger.debug("Indexing in multi-vector store")
+            main_count = 0
+            summary_count = 0
+            question_count = 0
+
+            for i, chunk in enumerate(chunks):
+                # Main embedding
+                main_emb = embedder.embed(chunk.contextualized_text)
+                multi_vector_index.main_index.add(chunk.id, main_emb)
+                keyword_index.add(chunk.id, chunk.text)
+                main_count += 1
+
+                # Summary and question embeddings
+                if i < len(enrichment_results):
+                    metadata, questions = enrichment_results[i]
+
+                    if metadata and metadata.summary:
+                        summary_emb = embedder.embed(metadata.summary)
+                        summary_id = f"{chunk.id}_summary"
+                        multi_vector_index.summary_index.add(summary_id, summary_emb)
+                        summary_count += 1
+
+                    for q in questions:
+                        q_emb = embedder.embed(q.question)
+                        q_vector_id = f"q_{chunk.id}_{q.id}"
+                        multi_vector_index.question_index.add(q_vector_id, q_emb)
+                        multi_vector_index._question_to_chunk[q_vector_id] = chunk.id
+                        question_count += 1
+
+            # Save indexes
+            multi_vector_index.save()
+            keyword_index.save()
+
             logger.info(
                 f"Successfully indexed {file_path.name}: "
-                f"{len(chunks)} chunks, type={enrichment.document_type}"
+                f"{len(chunks)} chunks, {main_count} main, "
+                f"{summary_count} summary, {question_count} question vectors"
             )
 
             return document
@@ -148,7 +187,7 @@ class DocumentProcessor:
 
     async def remove_file(self, file_path: Path) -> bool:
         """Remove a file from all indexes."""
-        document_id = self._generate_document_id(file_path)
+        document_id = generate_document_id(file_path)
 
         logger.info(f"Removing from index: {file_path}")
 
@@ -158,9 +197,6 @@ class DocumentProcessor:
             chunk_ids = [c.id for c in chunks]
 
             if chunk_ids:
-                # Remove from vector index
-                vector_index.remove(chunk_ids)
-
                 # Remove from keyword index
                 keyword_index.remove(chunk_ids)
 
@@ -182,12 +218,15 @@ class DocumentProcessor:
             return False
 
     async def reindex_all(self) -> dict:
-        """Reindex all files in the watch folder."""
-        logger.info("Starting full reindex")
+        """Reindex all files in the watch folder using multi-vector indexing."""
+        logger.info("Starting full reindex with multi-vector indexing")
 
-        # Clear all indexes
-        vector_index.clear()
+        # Clear ALL indexes
         keyword_index.clear()
+        multi_vector_index.clear()
+
+        # Clear all metadata from database
+        await metadata_store.clear_all()
 
         # Get all supported files
         watch_folder = settings.watch_folder
@@ -202,48 +241,171 @@ class DocumentProcessor:
         for ext in parser_registry.supported_extensions:
             for file_path in watch_folder.rglob(f"*.{ext}"):
                 try:
-                    result = await self.process_file(file_path)
+                    result = await self._reindex_file_advanced(file_path)
                     if result:
                         processed += 1
                     else:
                         skipped += 1
                 except Exception as e:
-                    logger.error(f"Failed to reindex {file_path}: {e}")
+                    logger.error(f"Failed to reindex {file_path}: {e}", exc_info=True)
                     failed += 1
 
-        # Save indexes
-        await self.save_indexes()
+        # Save all indexes
+        keyword_index.save()
+        multi_vector_index.save()
 
         logger.info(f"Reindex complete: {processed} processed, {failed} failed, {skipped} skipped")
 
         return {"processed": processed, "failed": failed, "skipped": skipped}
 
+    async def _reindex_file_advanced(self, file_path: Path) -> bool:
+        """Reindex a single file using the advanced multi-vector workflow.
+
+        Steps:
+        1. Parse file
+        2. Create document with enrichment
+        3. Create chunks using hierarchical chunker
+        4. Enrich chunks with summaries and questions
+        5. Index into multi-vector index
+        """
+        logger.info(f"Reindexing (advanced): {file_path}")
+
+        # Generate document ID
+        document_id = generate_document_id(file_path)
+        file_hash = compute_file_hash(file_path)
+
+        # Step 1: Parse
+        parser = parser_registry.get_parser(file_path)
+        parse_result = parser.parse(file_path)
+
+        if not parse_result.text:
+            logger.warning(f"No text extracted from: {file_path}")
+            return False
+
+        # Step 2: Create document enrichment
+        file_type = file_path.suffix.lower().lstrip(".")
+        enrichment = await entity_extractor.enrich(
+            parse_result=parse_result,
+            file_name=file_path.name,
+            file_type=file_type,
+        )
+
+        # Create document record
+        document = Document(
+            id=document_id,
+            file_path=str(file_path.absolute()),
+            file_name=file_path.name,
+            file_type=file_type,
+            file_hash=file_hash,
+            detected_doc_type=enrichment.document_type,
+            summary=enrichment.summary,
+            entities=enrichment.entities,
+            key_topics=enrichment.key_topics,
+            table_descriptions=enrichment.table_descriptions,
+            indexed_at=datetime.utcnow(),
+            processing_status="processing",
+            sheet_names=parse_result.sheet_names,
+            column_schema=parse_result.column_types,
+            row_count=parse_result.row_count,
+        )
+        await metadata_store.add_document(document)
+
+        # Step 3: Create chunks using hierarchical chunker
+        # Use markdown from parse result, or plain text if no markdown
+        markdown = parse_result.markdown or parse_result.text
+
+        doc_chunks = hierarchical_chunker.chunk_document(
+            markdown=markdown,
+            layout_data=None,
+            document_id=document_id,
+            file_name=file_path.name,
+            detected_doc_type=enrichment.document_type,
+            entities=enrichment.entities,
+        )
+
+        if not doc_chunks:
+            logger.warning(f"No chunks created for: {file_path}")
+            await metadata_store.update_document_status(document_id, "failed")
+            return False
+
+        # Save chunks to database
+        await metadata_store.add_chunks(doc_chunks)
+
+        # Step 4: Enrich chunks with summaries and questions
+        doc_context = {
+            "file_name": file_path.name,
+            "detected_doc_type": enrichment.document_type,
+            "summary": enrichment.summary,
+        }
+
+        try:
+            enrichment_results = await chunk_enricher.enrich_batch(doc_chunks, doc_context)
+
+            # Save enrichment results
+            total_questions = 0
+            for (metadata, questions), chunk in zip(enrichment_results, doc_chunks):
+                await metadata_store.add_chunk_metadata(metadata)
+                if questions:
+                    await metadata_store.add_chunk_questions(chunk.id, questions)
+                    total_questions += len(questions)
+        except Exception as e:
+            logger.warning(f"Chunk enrichment failed for {file_path}, continuing without: {e}")
+            enrichment_results = [(None, []) for _ in doc_chunks]
+            total_questions = 0
+
+        # Step 5: Index into multi-vector index
+        main_count = 0
+        summary_count = 0
+        question_count = 0
+
+        for i, chunk in enumerate(doc_chunks):
+            # Main embedding (contextualized text)
+            main_emb = embedder.embed(chunk.contextualized_text)
+            multi_vector_index.main_index.add(chunk.id, main_emb)
+            keyword_index.add(chunk.id, chunk.text)
+            main_count += 1
+
+            # Summary embedding (if enrichment succeeded)
+            if i < len(enrichment_results):
+                metadata, questions = enrichment_results[i]
+
+                if metadata and metadata.summary:
+                    summary_emb = embedder.embed(metadata.summary)
+                    summary_id = f"{chunk.id}_summary"
+                    multi_vector_index.summary_index.add(summary_id, summary_emb)
+                    summary_count += 1
+
+                # Question embeddings
+                for q in questions:
+                    q_emb = embedder.embed(q.question)
+                    q_vector_id = f"q_{chunk.id}_{q.id}"
+                    multi_vector_index.question_index.add(q_vector_id, q_emb)
+                    multi_vector_index._question_to_chunk[q_vector_id] = chunk.id
+                    question_count += 1
+
+        # Update document status
+        await metadata_store.update_document_status(document_id, "indexed")
+
+        logger.info(
+            f"Indexed {file_path.name}: {len(doc_chunks)} chunks, "
+            f"{main_count} main, {summary_count} summary, {question_count} question vectors"
+        )
+
+        return True
+
     async def save_indexes(self) -> None:
         """Save all indexes to disk."""
         logger.info("Saving indexes to disk")
-        vector_index.save()
         keyword_index.save()
+        multi_vector_index.save()
         logger.info("Indexes saved")
 
     async def load_indexes(self) -> None:
         """Load all indexes from disk."""
         logger.info("Loading indexes from disk")
-        vector_index.load()
         keyword_index.load()
+        multi_vector_index.load()
         logger.info("Indexes loaded")
-
-    def _generate_document_id(self, file_path: Path) -> str:
-        """Generate a unique document ID from file path."""
-        path_str = str(file_path.absolute())
-        return hashlib.sha256(path_str.encode()).hexdigest()[:32]
-
-    def _compute_file_hash(self, file_path: Path) -> str:
-        """Compute SHA256 hash of file content."""
-        sha256 = hashlib.sha256()
-        with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                sha256.update(chunk)
-        return sha256.hexdigest()
 
     async def index_from_markdown(self, document_id: str, markdown: str) -> Document | None:
         """Index a document from its extracted/reviewed markdown.
@@ -258,8 +420,8 @@ class DocumentProcessor:
         2. Create ParseResult from markdown
         3. Enrich with LLM
         4. Create chunks
-        5. Embed chunks
-        6. Index in vector store
+        5. Enrich chunks with summaries and questions
+        6. Index in multi-vector store (main, summary, question)
         7. Index in keyword store
         8. Update document with enrichment data
         """
@@ -278,8 +440,9 @@ class DocumentProcessor:
             chunks = await metadata_store.get_chunks_by_document(document_id)
             if chunks:
                 chunk_ids = [c.id for c in chunks]
-                vector_index.remove(chunk_ids)
                 keyword_index.remove(chunk_ids)
+                for chunk_id in chunk_ids:
+                    multi_vector_index.remove_chunk(chunk_id)
                 await metadata_store.delete_chunks_by_document(document_id)
 
             # Create minimal ParseResult from markdown
@@ -319,22 +482,63 @@ class DocumentProcessor:
                 logger.warning(f"No chunks created for: {doc.file_name}")
                 return None
 
-            # Embed chunks
-            logger.debug(f"Embedding {len(doc_chunks)} chunks")
-            contextualized_texts = [c.contextualized_text for c in doc_chunks]
-            embeddings = embedder.embed_batch(contextualized_texts)
-
-            # Index in vector store
-            logger.debug("Indexing in vector store")
-            chunk_ids = [c.id for c in doc_chunks]
-            vector_index.add_batch(chunk_ids, embeddings)
-
-            # Index in keyword store
-            logger.debug("Indexing in keyword store")
-            keyword_index.add_batch(chunk_ids, contextualized_texts)
-
-            # Add chunks to metadata store
+            # Add chunks to metadata store first
             await metadata_store.add_chunks(doc_chunks)
+
+            # Enrich chunks with summaries and questions
+            logger.debug(f"Enriching {len(doc_chunks)} chunks with LLM")
+            doc_context = {
+                "file_name": doc.file_name,
+                "detected_doc_type": enrichment.document_type,
+                "summary": enrichment.summary,
+            }
+
+            try:
+                enrichment_results = await chunk_enricher.enrich_batch(doc_chunks, doc_context)
+
+                # Save enrichment results to database
+                total_questions = 0
+                for (metadata, questions), chunk in zip(enrichment_results, doc_chunks):
+                    if metadata:
+                        await metadata_store.add_chunk_metadata(metadata)
+                    if questions:
+                        await metadata_store.add_chunk_questions(chunk.id, questions)
+                        total_questions += len(questions)
+            except Exception as e:
+                logger.warning(f"Chunk enrichment failed, continuing without: {e}")
+                enrichment_results = [(None, []) for _ in doc_chunks]
+                total_questions = 0
+
+            # Index in multi-vector store
+            logger.debug("Indexing in multi-vector store")
+            main_count = 0
+            summary_count = 0
+            question_count = 0
+
+            for i, chunk in enumerate(doc_chunks):
+                # Main embedding (contextualized text)
+                main_emb = embedder.embed(chunk.contextualized_text)
+                multi_vector_index.main_index.add(chunk.id, main_emb)
+                keyword_index.add(chunk.id, chunk.text)
+                main_count += 1
+
+                # Summary and question embeddings (if enrichment succeeded)
+                if i < len(enrichment_results):
+                    metadata, questions = enrichment_results[i]
+
+                    if metadata and metadata.summary:
+                        summary_emb = embedder.embed(metadata.summary)
+                        summary_id = f"{chunk.id}_summary"
+                        multi_vector_index.summary_index.add(summary_id, summary_emb)
+                        summary_count += 1
+
+                    # Question embeddings
+                    for q in questions:
+                        q_emb = embedder.embed(q.question)
+                        q_vector_id = f"q_{chunk.id}_{q.id}"
+                        multi_vector_index.question_index.add(q_vector_id, q_emb)
+                        multi_vector_index._question_to_chunk[q_vector_id] = chunk.id
+                        question_count += 1
 
             # Update document with enrichment data
             await metadata_store.update_document_enrichment(
@@ -348,11 +552,13 @@ class DocumentProcessor:
 
             logger.info(
                 f"Successfully indexed {doc.file_name}: "
-                f"{len(doc_chunks)} chunks, type={enrichment.document_type}"
+                f"{len(doc_chunks)} chunks, {main_count} main, "
+                f"{summary_count} summary, {question_count} question vectors"
             )
 
             # Save indexes
-            await self.save_indexes()
+            multi_vector_index.save()
+            keyword_index.save()
 
             # Return the updated document
             return await metadata_store.get_document(document_id)
@@ -404,7 +610,6 @@ class DocumentProcessor:
         chunks = await metadata_store.get_chunks_by_document(document_id)
         if chunks:
             chunk_ids = [c.id for c in chunks]
-            vector_index.remove(chunk_ids)
             keyword_index.remove(chunk_ids)
             for cid in chunk_ids:
                 multi_vector_index.remove_chunk(cid)

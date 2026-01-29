@@ -222,7 +222,3 @@ class VectorIndex:
     def num_chunks(self) -> int:
         """Get number of chunk IDs (may differ from size if removals occurred)."""
         return len(self._id_to_idx)
-
-
-# Global instance
-vector_index = VectorIndex()

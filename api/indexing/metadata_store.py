@@ -352,6 +352,19 @@ class MetadataStore:
             await db.commit()
             return cursor.rowcount > 0
 
+    async def clear_all(self) -> None:
+        """Clear all data from the database (for full reindex)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Delete in order to respect foreign key constraints
+            await db.execute("DELETE FROM vector_embeddings")
+            await db.execute("DELETE FROM chunk_questions")
+            await db.execute("DELETE FROM chunk_metadata")
+            await db.execute("DELETE FROM chunks")
+            await db.execute("DELETE FROM document_entities")
+            await db.execute("DELETE FROM document_pages")
+            await db.execute("DELETE FROM documents")
+            await db.commit()
+
     async def add_chunks(self, chunks: list[Chunk]) -> None:
         """Insert chunks for a document."""
         if not chunks:

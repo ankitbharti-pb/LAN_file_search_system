@@ -1,6 +1,7 @@
 """Enhanced hybrid search with multi-vector RRF fusion retrieval.
 
 Supports HyDE (Hypothetical Document Embeddings) for improved query-document matching.
+Includes optional cross-encoder re-ranking and MMR diversity.
 """
 
 import logging
@@ -16,6 +17,28 @@ from models.search_result import SearchResultItem
 from search.hyde import hyde_expander
 
 logger = logging.getLogger(__name__)
+
+# Lazy imports for optional components
+_reranker = None
+_mmr_selector = None
+
+
+def get_reranker():
+    """Lazy load reranker to avoid loading model unless needed."""
+    global _reranker
+    if _reranker is None:
+        from search.reranker import reranker
+        _reranker = reranker
+    return _reranker
+
+
+def get_mmr_selector():
+    """Lazy load MMR selector."""
+    global _mmr_selector
+    if _mmr_selector is None:
+        from search.mmr import mmr_selector
+        _mmr_selector = mmr_selector
+    return _mmr_selector
 
 SourceType = Literal["main_vector", "summary_vector", "question_vector", "bm25"]
 
@@ -51,17 +74,17 @@ class EnhancedHybridSearch:
     def __init__(
         self,
         weights: dict[str, float] | None = None,
-        k_constant: int = 60,
+        k_constant: int | None = None,
     ):
         """
         Initialize enhanced hybrid search.
 
         Args:
             weights: Weights for each retrieval source
-            k_constant: RRF constant (higher = more emphasis on top ranks)
+            k_constant: RRF constant (higher = more emphasis on top ranks). Uses settings.rrf_k_constant if not provided.
         """
         self.weights = weights or settings.multi_vector_weights
-        self.k_constant = k_constant
+        self.k_constant = k_constant if k_constant is not None else settings.rrf_k_constant
 
     async def search(
         self,
@@ -70,6 +93,7 @@ class EnhancedHybridSearch:
         filters: dict[str, Any] | None = None,
         debug: bool = False,
         document_id: str | None = None,
+        query_type: str | None = None,
     ) -> EnhancedSearchResult:
         """
         Execute enhanced hybrid search with multi-vector retrieval.
@@ -80,11 +104,16 @@ class EnhancedHybridSearch:
             filters: Optional filters (doc_type, entities)
             debug: If True, include debug information
             document_id: If provided, search only within this document
+            query_type: Query type for adaptive weights ('factual', 'exploratory', 'comparative', 'aggregation')
 
         Returns:
             EnhancedSearchResult with results and optional debug info
         """
         debug_info = DebugInfo(query=query) if debug else None
+
+        # Select weight profile based on query type (if provided and not overridden in constructor)
+        if query_type and self.weights == settings.multi_vector_weights:
+            self.weights = settings.get_weight_profile(query_type)
 
         # Apply filters to get candidate chunk IDs
         filter_chunk_ids = None
@@ -167,9 +196,18 @@ class EnhancedHybridSearch:
 
         if debug_info:
             debug_info.rrf_scores = rrf_details
-            debug_info.final_ranking = fused[:k]
 
-        top_results = fused[:k]
+        # Apply optional post-processing: re-ranking and/or MMR
+        top_results = await self._apply_post_processing(
+            query=query,
+            query_embedding=query_embedding,
+            fused_results=fused,
+            k=k,
+        )
+
+        if debug_info:
+            debug_info.final_ranking = top_results[:k]
+
         results = []
         source_attribution: dict[str, list[SourceType]] = {}
 
@@ -192,6 +230,81 @@ class EnhancedHybridSearch:
             debug_info.source_attribution = source_attribution
 
         return EnhancedSearchResult(results=results, debug_info=debug_info)
+
+    async def _apply_post_processing(
+        self,
+        query: str,
+        query_embedding,
+        fused_results: list[tuple[str, float]],
+        k: int,
+    ) -> list[tuple[str, float]]:
+        """Apply optional post-processing: re-ranking and/or MMR.
+
+        Args:
+            query: Search query
+            query_embedding: Query embedding vector
+            fused_results: Results from RRF fusion
+            k: Number of final results to return
+
+        Returns:
+            Post-processed list of (chunk_id, score) tuples
+        """
+        # Get more candidates for re-ranking/MMR
+        candidate_k = min(len(fused_results), settings.reranker_top_k if settings.reranker_enabled else k * 2)
+        candidates = fused_results[:candidate_k]
+
+        # Fetch chunk texts for re-ranking or MMR (they need the text)
+        if settings.reranker_enabled or settings.mmr_enabled:
+            results_with_text = []
+            for chunk_id, score in candidates:
+                chunk = await metadata_store.get_chunk(chunk_id)
+                if chunk:
+                    results_with_text.append((chunk_id, score, chunk.text))
+                else:
+                    results_with_text.append((chunk_id, score, ""))
+
+            # Apply cross-encoder re-ranking
+            if settings.reranker_enabled:
+                try:
+                    reranker = get_reranker()
+                    reranked = reranker.rerank(query, results_with_text, top_k=k)
+                    logger.debug(f"Re-ranked {len(reranked)} results with cross-encoder")
+
+                    # Update results_with_text with reranked scores for potential MMR
+                    reranked_dict = {cid: score for cid, score in reranked}
+                    results_with_text = [
+                        (cid, reranked_dict.get(cid, score), text)
+                        for cid, score, text in results_with_text
+                        if cid in reranked_dict
+                    ]
+                    results_with_text.sort(key=lambda x: x[1], reverse=True)
+
+                    # If MMR not enabled, return reranked results
+                    if not settings.mmr_enabled:
+                        return [(cid, score) for cid, score, _ in results_with_text[:k]]
+
+                except Exception as e:
+                    logger.error(f"Re-ranking failed, using RRF results: {e}")
+
+            # Apply MMR for diversity
+            if settings.mmr_enabled:
+                try:
+                    mmr = get_mmr_selector()
+                    mmr_results = mmr.select(
+                        query_embedding=query_embedding,
+                        results=results_with_text,
+                        k=k,
+                    )
+                    logger.debug(f"MMR selected {len(mmr_results)} diverse results")
+                    return mmr_results
+                except Exception as e:
+                    logger.error(f"MMR failed, using previous results: {e}")
+
+            # Return results without MMR if it failed
+            return [(cid, score) for cid, score, _ in results_with_text[:k]]
+
+        # No post-processing, return top k from RRF
+        return fused_results[:k]
 
     def _multi_source_rrf(
         self,

@@ -26,6 +26,46 @@ STOPWORDS: Set[str] = {
     "under", "again", "further", "any", "being", "having", "doing",
 }
 
+# Insurance domain-specific synonyms for query expansion
+INSURANCE_SYNONYMS: dict[str, List[str]] = {
+    "policy": ["coverage", "plan", "contract"],
+    "premium": ["rate", "cost", "price", "payment"],
+    "claim": ["loss", "incident", "occurrence"],
+    "deductible": ["excess", "retention", "selfinsured"],
+    "coverage": ["protection", "insurance", "policy"],
+    "endorsement": ["rider", "amendment", "addendum"],
+    "underwriting": ["riskassessment", "evaluation"],
+    "insured": ["policyholder", "client", "customer"],
+    "beneficiary": ["payee", "recipient"],
+    "carrier": ["insurer", "company", "provider"],
+    "agent": ["broker", "producer", "representative"],
+    "renewal": ["extension", "continuation"],
+    "cancellation": ["termination", "void", "cancel"],
+    "exclusion": ["exception", "limitation"],
+    "limit": ["maximum", "cap", "ceiling"],
+    "liability": ["responsibility", "obligation"],
+    "peril": ["risk", "hazard", "danger"],
+    "sublimit": ["sublimitation", "internalimit"],
+    "coinsurance": ["costsharing", "copay"],
+    "indemnity": ["compensation", "reimbursement"],
+}
+
+# Insurance acronyms for expansion
+INSURANCE_ACRONYMS: dict[str, str] = {
+    "coi": "certificate of insurance",
+    "gl": "general liability",
+    "wc": "workers compensation",
+    "bop": "business owners policy",
+    "epli": "employment practices liability",
+    "dno": "directors officers",
+    "eno": "errors omissions",
+    "pip": "personal injury protection",
+    "um": "uninsured motorist",
+    "uim": "underinsured motorist",
+    "bi": "bodily injury",
+    "pd": "property damage",
+}
+
 
 class KeywordIndex:
     """BM25 keyword index using rank_bm25."""
@@ -65,16 +105,23 @@ class KeywordIndex:
         # Mark BM25 as needing rebuild
         self._bm25 = None
 
-    def search(self, query: str, k: int = 10) -> List[Tuple[str, float]]:
-        """Search for documents matching the query."""
+    def search(self, query: str, k: int = 10, expand_query: bool | None = None) -> List[Tuple[str, float]]:
+        """Search for documents matching the query.
+
+        Args:
+            query: Search query text
+            k: Number of results to return
+            expand_query: Whether to expand query with synonyms. If None, uses settings.query_expand_synonyms.
+        """
         if not self._corpus:
             return []
 
         # Build BM25 if needed
         self._ensure_bm25()
 
-        # Tokenize query
-        query_tokens = self._tokenize(query)
+        # Tokenize query with optional synonym expansion
+        should_expand = expand_query if expand_query is not None else settings.query_expand_synonyms
+        query_tokens = self._tokenize(query, expand_synonyms=should_expand)
         if not query_tokens:
             return []
 
@@ -93,9 +140,14 @@ class KeywordIndex:
         return results
 
     def search_with_keywords(
-        self, query: str, k: int = 10
+        self, query: str, k: int = 10, expand_query: bool | None = None
     ) -> List[Tuple[str, float, List[str]]]:
         """Search for documents matching the query, returning matched keywords.
+
+        Args:
+            query: Search query text
+            k: Number of results to return
+            expand_query: Whether to expand query with synonyms. If None, uses settings.query_expand_synonyms.
 
         Returns:
             List of (chunk_id, score, matched_keywords) tuples
@@ -106,8 +158,9 @@ class KeywordIndex:
         # Build BM25 if needed
         self._ensure_bm25()
 
-        # Tokenize query
-        query_tokens = self._tokenize(query)
+        # Tokenize query with optional synonym expansion
+        should_expand = expand_query if expand_query is not None else settings.query_expand_synonyms
+        query_tokens = self._tokenize(query, expand_synonyms=should_expand)
         if not query_tokens:
             return []
 
@@ -190,8 +243,13 @@ class KeywordIndex:
         self._corpus = []
         self._bm25 = None
 
-    def _tokenize(self, text: str) -> List[str]:
-        """Tokenize text for BM25 with stopword removal and simple stemming."""
+    def _tokenize(self, text: str, expand_synonyms: bool | None = None) -> List[str]:
+        """Tokenize text for BM25 with stopword removal, stemming, and optional synonym expansion.
+
+        Args:
+            text: Input text to tokenize
+            expand_synonyms: Whether to expand synonyms. If None, uses settings.bm25_expand_synonyms.
+        """
         # Convert to lowercase
         text = text.lower()
 
@@ -201,16 +259,34 @@ class KeywordIndex:
         # Split on whitespace
         tokens = text.split()
 
+        # Determine if we should expand synonyms
+        should_expand = expand_synonyms if expand_synonyms is not None else settings.bm25_expand_synonyms
+
         # Filter: remove stopwords, short tokens, and apply simple suffix stripping
         processed = []
         for token in tokens:
             # Skip short tokens and stopwords
-            if len(token) <= 2 or token in STOPWORDS:
+            min_length = settings.bm25_min_token_length
+            if len(token) < min_length or token in STOPWORDS:
+                continue
+
+            # Expand acronyms first (before stemming)
+            if should_expand and token in INSURANCE_ACRONYMS:
+                expanded_text = INSURANCE_ACRONYMS[token]
+                expanded_tokens = [t for t in expanded_text.split() if len(t) >= min_length and t not in STOPWORDS]
+                processed.extend(expanded_tokens)
                 continue
 
             # Simple suffix stripping (basic stemming without nltk)
             stemmed = self._simple_stem(token)
             processed.append(stemmed)
+
+            # Expand synonyms (add synonyms alongside original term)
+            if should_expand and stemmed in INSURANCE_SYNONYMS:
+                for synonym in INSURANCE_SYNONYMS[stemmed]:
+                    syn_stemmed = self._simple_stem(synonym)
+                    if syn_stemmed not in processed:
+                        processed.append(syn_stemmed)
 
         return processed
 
