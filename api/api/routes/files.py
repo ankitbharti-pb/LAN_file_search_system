@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 
 from config.settings import settings
 from core.utils import generate_document_id, compute_file_hash
+from core.document_processor import document_processor
 from parsers import parser_registry
 from indexing.metadata_store import metadata_store
 from indexing.keyword_index import keyword_index
@@ -406,43 +407,16 @@ async def delete_file(path: str) -> DeleteResponse:
 
     rel_path = _get_relative_path(file_path)
 
-    # Get document record if exists
     doc_id = generate_document_id(file_path)
     doc = await metadata_store.get_document(doc_id)
     was_indexed = doc is not None and doc.processing_status == "indexed"
 
     try:
-        # Clean up document data if exists
+        # Remove from indexes, DB, and processing artifacts
         if doc:
-            # Get chunks BEFORE deleting from database
-            chunks = await metadata_store.get_chunks_by_document(doc_id)
-            chunk_ids = [c.id for c in chunks]
+            await document_processor.remove_file(file_path)
 
-            # Clean up vector indices
-            if chunk_ids:
-                keyword_index.remove(chunk_ids)
-                for chunk_id in chunk_ids:
-                    multi_vector_index.remove_chunk(chunk_id)
-                logger.info(f"Removed {len(chunk_ids)} chunks from indices")
-
-            # Delete page records
-            await metadata_store.delete_pages(doc_id)
-
-            # Delete chunks from database
-            await metadata_store.delete_chunks_by_document(doc_id)
-
-            # Delete document record
-            await metadata_store.delete_document(doc_id)
-
-            # Clean up processing directory
-            processing_dir = settings.data_folder / "processing" / doc_id
-            if processing_dir.exists():
-                import shutil
-                shutil.rmtree(processing_dir)
-
-            logger.info(f"Removed document data: {doc_id}")
-
-        # Delete the file
+        # Delete the file from disk
         file_path.unlink()
         logger.info(f"Deleted file: {rel_path}")
 
@@ -487,29 +461,14 @@ async def delete_folder(path: str, force: bool = Query(default=False)) -> Delete
 
     try:
         if contents:
-            # Clean up document data for all files in folder
+            # Remove all indexed files from indexes (batch: save=False per file)
             for item in folder_path.rglob("*"):
                 if item.is_file() and parser_registry.is_supported(item):
-                    doc_id = generate_document_id(item)
-                    doc = await metadata_store.get_document(doc_id)
+                    doc = await metadata_store.get_document(generate_document_id(item))
                     if doc:
-                        # Get chunks and clean indices BEFORE DB deletion
-                        chunks = await metadata_store.get_chunks_by_document(doc_id)
-                        chunk_ids = [c.id for c in chunks]
-                        if chunk_ids:
-                            keyword_index.remove(chunk_ids)
-                            for chunk_id in chunk_ids:
-                                multi_vector_index.remove_chunk(chunk_id)
+                        await document_processor.remove_file(item, save=False)
 
-                        await metadata_store.delete_pages(doc_id)
-                        await metadata_store.delete_chunks_by_document(doc_id)
-                        await metadata_store.delete_document(doc_id)
-                        # Clean up processing directory
-                        processing_dir = settings.data_folder / "processing" / doc_id
-                        if processing_dir.exists():
-                            shutil.rmtree(processing_dir)
-
-            # Save indices after all files cleaned up
+            # Save indexes once after all removals
             keyword_index.save()
             multi_vector_index.save()
 

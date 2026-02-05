@@ -2,6 +2,7 @@
 
 import json
 import aiosqlite
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from datetime import datetime
@@ -23,7 +24,15 @@ class MetadataStore:
         if self._db is None:
             self._db = await aiosqlite.connect(self.db_path)
             self._db.row_factory = aiosqlite.Row
+            await self._db.execute("PRAGMA foreign_keys = ON")
         return self._db
+
+    @asynccontextmanager
+    async def _write_db(self):
+        """Get a write connection with foreign keys enabled."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
+            yield db
 
     async def close(self) -> None:
         """Close the persistent database connection."""
@@ -35,7 +44,7 @@ class MetadataStore:
         """Create database and tables if they don't exist."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             await db.execute("PRAGMA journal_mode=WAL")
 
             # Documents table
@@ -255,7 +264,7 @@ class MetadataStore:
 
     async def add_document(self, document: Document) -> None:
         """Insert or update a document."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             await db.execute(
                 """
                 INSERT OR REPLACE INTO documents
@@ -313,7 +322,7 @@ class MetadataStore:
 
     async def get_document_by_path(self, file_path: str) -> Document | None:
         """Get a document by file path."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT * FROM documents WHERE file_path = ?", (file_path,)
@@ -329,7 +338,7 @@ class MetadataStore:
         self, skip: int = 0, limit: int = 100
     ) -> list[DocumentSummary]:
         """Get all documents with pagination."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -371,7 +380,7 @@ class MetadataStore:
 
     async def delete_document(self, document_id: str) -> bool:
         """Delete a document and its chunks."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             cursor = await db.execute(
                 "DELETE FROM documents WHERE id = ?", (document_id,)
             )
@@ -380,7 +389,7 @@ class MetadataStore:
 
     async def delete_document_by_path(self, file_path: str) -> bool:
         """Delete a document by file path."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             cursor = await db.execute(
                 "DELETE FROM documents WHERE file_path = ?", (file_path,)
             )
@@ -389,7 +398,7 @@ class MetadataStore:
 
     async def clear_all(self) -> None:
         """Clear all data from the database (for full reindex)."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             # Delete in order to respect foreign key constraints
             await db.execute("DELETE FROM vector_embeddings")
             await db.execute("DELETE FROM chunk_questions")
@@ -405,7 +414,7 @@ class MetadataStore:
         if not chunks:
             return
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             await db.executemany(
                 """
                 INSERT OR REPLACE INTO chunks
@@ -479,7 +488,7 @@ class MetadataStore:
 
     async def delete_chunks_by_document(self, document_id: str) -> int:
         """Delete all chunks for a document."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             cursor = await db.execute(
                 "DELETE FROM chunks WHERE document_id = ?", (document_id,)
             )
@@ -519,7 +528,7 @@ class MetadataStore:
 
     async def get_statistics(self) -> dict[str, Any]:
         """Get index statistics."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             # Total documents
             cursor = await db.execute("SELECT COUNT(*) FROM documents")
             total_docs = (await cursor.fetchone())[0]
@@ -551,7 +560,7 @@ class MetadataStore:
 
     async def update_document_status(self, document_id: str, status: str) -> bool:
         """Update the processing status of a document."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             cursor = await db.execute(
                 "UPDATE documents SET processing_status = ? WHERE id = ?",
                 (status, document_id),
@@ -563,7 +572,7 @@ class MetadataStore:
         self, document_id: str, extracted_markdown: str
     ) -> bool:
         """Update the extracted markdown for a document."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             cursor = await db.execute(
                 "UPDATE documents SET extracted_markdown = ? WHERE id = ?",
                 (extracted_markdown, document_id),
@@ -575,7 +584,7 @@ class MetadataStore:
         self, document_id: str, reviewed_markdown: str
     ) -> bool:
         """Update the reviewed markdown for a document."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             cursor = await db.execute(
                 "UPDATE documents SET reviewed_markdown = ? WHERE id = ?",
                 (reviewed_markdown, document_id),
@@ -587,7 +596,7 @@ class MetadataStore:
         self, document_id: str, layout_data: str, page_count: int
     ) -> bool:
         """Update the layout data and page count for a document."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             cursor = await db.execute(
                 """UPDATE documents
                    SET layout_data = ?, page_count = ?, processing_status = 'layout_detected'
@@ -599,7 +608,7 @@ class MetadataStore:
 
     async def get_document_markdown(self, document_id: str) -> dict | None:
         """Get the markdown content for a document."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             cursor = await db.execute(
                 "SELECT extracted_markdown, reviewed_markdown, processing_status FROM documents WHERE id = ?",
                 (document_id,),
@@ -624,7 +633,7 @@ class MetadataStore:
     ) -> bool:
         """Update a document with LLM enrichment data after indexing."""
         import json
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             cursor = await db.execute(
                 """UPDATE documents
                    SET detected_doc_type = ?,
@@ -662,7 +671,7 @@ class MetadataStore:
     ) -> None:
         """Add or update a page for a document."""
         page_id = f"{document_id}_page_{page_number}"
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             await db.execute(
                 """INSERT OR REPLACE INTO document_pages
                    (id, document_id, page_number, image_path, annotated_image_path,
@@ -679,7 +688,7 @@ class MetadataStore:
         self, document_id: str, page_number: int, extracted_text: str
     ) -> bool:
         """Update the extracted text for a page."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             cursor = await db.execute(
                 """UPDATE document_pages
                    SET extracted_text = ?
@@ -691,7 +700,7 @@ class MetadataStore:
 
     async def get_pages(self, document_id: str) -> list[dict]:
         """Get all pages for a document."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """SELECT * FROM document_pages
@@ -718,7 +727,7 @@ class MetadataStore:
 
     async def get_page(self, document_id: str, page_number: int) -> dict | None:
         """Get a specific page for a document."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """SELECT * FROM document_pages
@@ -743,7 +752,7 @@ class MetadataStore:
 
     async def delete_pages(self, document_id: str) -> int:
         """Delete all pages for a document."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             cursor = await db.execute(
                 "DELETE FROM document_pages WHERE document_id = ?",
                 (document_id,),
@@ -760,7 +769,7 @@ class MetadataStore:
         file_hash: str,
     ) -> None:
         """Create a document in pending status (for manual processing workflow)."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             await db.execute(
                 """INSERT OR REPLACE INTO documents
                    (id, file_path, file_name, file_type, file_hash, processing_status, indexed_at)
@@ -842,7 +851,7 @@ class MetadataStore:
 
     async def add_chunk_metadata(self, metadata: ChunkMetadata) -> None:
         """Insert or update chunk metadata."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             await db.execute(
                 """
                 INSERT OR REPLACE INTO chunk_metadata
@@ -868,7 +877,7 @@ class MetadataStore:
         if not metadata_list:
             return
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             await db.executemany(
                 """
                 INSERT OR REPLACE INTO chunk_metadata
@@ -894,7 +903,7 @@ class MetadataStore:
 
     async def get_chunk_metadata(self, chunk_id: str) -> ChunkMetadata | None:
         """Get metadata for a chunk."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT * FROM chunk_metadata WHERE chunk_id = ?", (chunk_id,)
@@ -910,7 +919,7 @@ class MetadataStore:
             return {}
 
         placeholders = ",".join("?" * len(chunk_ids))
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 f"SELECT * FROM chunk_metadata WHERE chunk_id IN ({placeholders})",
@@ -936,7 +945,7 @@ class MetadataStore:
 
     async def delete_chunk_metadata(self, chunk_id: str) -> bool:
         """Delete metadata for a chunk."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             cursor = await db.execute(
                 "DELETE FROM chunk_metadata WHERE chunk_id = ?", (chunk_id,)
             )
@@ -950,7 +959,7 @@ class MetadataStore:
         if not questions:
             return
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             # Delete existing questions for this chunk
             await db.execute("DELETE FROM chunk_questions WHERE chunk_id = ?", (chunk_id,))
 
@@ -965,7 +974,7 @@ class MetadataStore:
 
     async def get_chunk_questions(self, chunk_id: str) -> list[ChunkQuestion]:
         """Get questions for a chunk."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT * FROM chunk_questions WHERE chunk_id = ?", (chunk_id,)
@@ -983,7 +992,7 @@ class MetadataStore:
 
     async def get_all_chunk_questions(self) -> list[ChunkQuestion]:
         """Get all chunk questions (for building question index)."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT * FROM chunk_questions")
             rows = await cursor.fetchall()
@@ -999,7 +1008,7 @@ class MetadataStore:
 
     async def update_question_vector_id(self, question_id: int, vector_id: str) -> bool:
         """Update the vector ID for a question."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             cursor = await db.execute(
                 "UPDATE chunk_questions SET vector_id = ? WHERE id = ?",
                 (vector_id, question_id),
@@ -1011,7 +1020,7 @@ class MetadataStore:
 
     async def add_vector_embedding(self, embedding: VectorEmbedding) -> None:
         """Insert or update a vector embedding record."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             await db.execute(
                 """
                 INSERT OR REPLACE INTO vector_embeddings
@@ -1033,7 +1042,7 @@ class MetadataStore:
         if not embeddings:
             return
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             await db.executemany(
                 """
                 INSERT OR REPLACE INTO vector_embeddings
@@ -1049,7 +1058,7 @@ class MetadataStore:
 
     async def get_vector_embeddings_by_chunk(self, chunk_id: str) -> list[VectorEmbedding]:
         """Get all vector embeddings for a chunk."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT * FROM vector_embeddings WHERE chunk_id = ?", (chunk_id,)
@@ -1068,7 +1077,7 @@ class MetadataStore:
 
     async def get_vector_embedding(self, vector_id: str) -> VectorEmbedding | None:
         """Get a vector embedding by ID."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT * FROM vector_embeddings WHERE id = ?", (vector_id,)
@@ -1086,18 +1095,34 @@ class MetadataStore:
 
     async def delete_vector_embeddings_by_chunk(self, chunk_id: str) -> int:
         """Delete all vector embeddings for a chunk."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             cursor = await db.execute(
                 "DELETE FROM vector_embeddings WHERE chunk_id = ?", (chunk_id,)
             )
             await db.commit()
             return cursor.rowcount
 
+    async def update_chunks_contextualized_text(self, chunks: list[Chunk]) -> None:
+        """Update contextualized_text for chunks after enrichment rebuild.
+
+        Args:
+            chunks: Chunks with rebuilt contextualized_text to persist
+        """
+        if not chunks:
+            return
+
+        async with self._write_db() as db:
+            await db.executemany(
+                "UPDATE chunks SET contextualized_text = ? WHERE id = ?",
+                [(chunk.contextualized_text, chunk.id) for chunk in chunks],
+            )
+            await db.commit()
+
     # ============== Hierarchical Chunk Methods ==============
 
     async def get_chunk_tree(self, document_id: str) -> list[dict]:
         """Get hierarchical chunk tree for a document."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1143,7 +1168,7 @@ class MetadataStore:
 
     async def get_child_chunks(self, parent_chunk_id: str) -> list[Chunk]:
         """Get all direct children of a chunk."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT * FROM chunks WHERE parent_chunk_id = ? ORDER BY chunk_index",
@@ -1156,7 +1181,7 @@ class MetadataStore:
         self, document_id: str, hierarchy_level: int
     ) -> list[Chunk]:
         """Get all chunks at a specific hierarchy level."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """

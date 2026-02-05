@@ -1,21 +1,13 @@
 """Chunking and enrichment routes for advanced RAG pipeline."""
 
-import json
 import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from config.settings import settings
+from core.document_processor import document_processor
 from indexing.metadata_store import metadata_store
-from indexing.hierarchical_chunker import hierarchical_chunker
-from indexing.semantic_chunker import create_semantic_chunker
-from indexing.chunk_enricher import chunk_enricher
-from indexing.embedder import embedder
-from indexing.multi_vector_index import multi_vector_index
-from indexing.keyword_index import keyword_index
-from models.chunk import Chunk, ChunkMetadata, ChunkQuestion, VectorEmbedding
 from search.enhanced_hybrid_search import enhanced_hybrid_search, DebugInfo
 
 logger = logging.getLogger(__name__)
@@ -118,80 +110,21 @@ class RetrievalDebugResponse(BaseModel):
 @router.post("/{doc_id}/chunk", response_model=ChunkingResponse)
 async def chunk_document(doc_id: str):
     """
-    Trigger hierarchical + semantic chunking for a document.
+    Trigger chunking for a document.
 
-    For documents (PDF, DOCX, PPTX): Requires markdown to be available.
-    For tabular files (CSV, Excel): Uses direct chunking without markdown.
+    Automatically selects strategy based on file type and settings:
+    - Tabular files (CSV, Excel): row-batch chunking
+    - Documents with CHUNKING_STRATEGY=paragraph: paragraph chunking
+    - Documents with CHUNKING_STRATEGY=hierarchical (default): hierarchical + semantic chunking
     """
-    # Get document
-    document = await metadata_store.get_document(doc_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    # Check if tabular file - use direct chunking
-    file_type = document.file_type.lower() if document.file_type else ""
-    is_tabular = file_type in ("csv", "xlsx", "xls")
-
-    if is_tabular:
-        # Redirect to tabular chunking (no markdown needed)
-        from api.routes.processing import chunk_tabular
-        result = await chunk_tabular(doc_id)
-        return ChunkingResponse(
-            document_id=result.document_id,
-            chunks_created=result.chunk_count,
-            status=result.status,
-        )
-
-    # Get markdown content (for documents)
-    markdown_data = await metadata_store.get_document_markdown(doc_id)
-    if not markdown_data:
-        raise HTTPException(status_code=400, detail="No markdown data found")
-
-    # Use reviewed markdown if available, else extracted
-    markdown = markdown_data.get("reviewed_markdown") or markdown_data.get("extracted_markdown")
-    if not markdown:
-        raise HTTPException(
-            status_code=400,
-            detail="No markdown content available. Extract text first."
-        )
-
-    # Parse layout data if available
-    layout_data = None
-    if document.layout_data:
-        try:
-            layout_data = json.loads(document.layout_data)
-        except json.JSONDecodeError:
-            logger.warning(f"Failed to parse layout data for {doc_id}")
-
-    # Delete existing chunks
-    await metadata_store.delete_chunks_by_document(doc_id)
-
-    # Hierarchical chunking
-    chunks = hierarchical_chunker.chunk_document(
-        markdown=markdown,
-        layout_data=layout_data,
-        document_id=doc_id,
-        file_name=document.file_name,
-        detected_doc_type=document.detected_doc_type,
-        entities=document.entities,
-    )
-
-    # Semantic chunking (refine large chunks)
-    if settings.enable_semantic_chunking and chunks:
-        semantic_chunker = create_semantic_chunker(embedder)
-        chunks = semantic_chunker.refine_chunks(chunks, settings.max_chunk_size)
-
-    # Save chunks
-    await metadata_store.add_chunks(chunks)
-
-    # Update status
-    await metadata_store.update_document_status(doc_id, "chunked")
-
-    logger.info(f"Created {len(chunks)} chunks for document {doc_id}")
+    try:
+        chunks_created = await document_processor.chunk_document(doc_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     return ChunkingResponse(
         document_id=doc_id,
-        chunks_created=len(chunks),
+        chunks_created=chunks_created,
         status="chunked",
     )
 
@@ -203,49 +136,15 @@ async def enrich_chunks(doc_id: str):
 
     Extracts metadata, keywords, entities, and hypothetical questions.
     """
-    # Get document
-    document = await metadata_store.get_document(doc_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    # Get chunks
-    chunks = await metadata_store.get_chunks_by_document(doc_id)
-    if not chunks:
-        raise HTTPException(
-            status_code=400,
-            detail="No chunks found. Run chunking first."
-        )
-
-    # Prepare document context
-    doc_context = {
-        "file_name": document.file_name,
-        "detected_doc_type": document.detected_doc_type,
-        "summary": document.summary,
-    }
-
-    # Enrich chunks
-    results = await chunk_enricher.enrich_batch(chunks, doc_context)
-
-    # Save metadata and questions
-    total_questions = 0
-    for (metadata, questions), chunk in zip(results, chunks):
-        # Save metadata
-        await metadata_store.add_chunk_metadata(metadata)
-
-        # Save questions
-        if questions:
-            await metadata_store.add_chunk_questions(chunk.id, questions)
-            total_questions += len(questions)
-
-    # Update status
-    await metadata_store.update_document_status(doc_id, "enriched")
-
-    logger.info(f"Enriched {len(chunks)} chunks with {total_questions} questions for {doc_id}")
+    try:
+        enriched, questions = await document_processor.enrich_chunks(doc_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     return EnrichmentResponse(
         document_id=doc_id,
-        chunks_enriched=len(chunks),
-        questions_generated=total_questions,
+        chunks_enriched=enriched,
+        questions_generated=questions,
         status="enriched",
     )
 
@@ -257,95 +156,16 @@ async def index_vectors(doc_id: str):
 
     Creates embeddings for main text, summaries, and questions.
     """
-    # Get document
-    document = await metadata_store.get_document(doc_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    # Get chunks
-    chunks = await metadata_store.get_chunks_by_document(doc_id)
-    if not chunks:
-        raise HTTPException(
-            status_code=400,
-            detail="No chunks found. Run chunking first."
-        )
-
-    main_count = 0
-    summary_count = 0
-    question_count = 0
-
-    # Process each chunk
-    for chunk in chunks:
-        # Get metadata and questions
-        metadata = await metadata_store.get_chunk_metadata(chunk.id)
-        questions = await metadata_store.get_chunk_questions(chunk.id)
-
-        # Main embedding (contextualized text)
-        main_embedding = embedder.embed(chunk.contextualized_text)
-        multi_vector_index.main_index.add(chunk.id, main_embedding)
-        keyword_index.add(chunk.id, chunk.text)
-        main_count += 1
-
-        # Track vector embedding
-        await metadata_store.add_vector_embedding(VectorEmbedding(
-            id=chunk.id,
-            chunk_id=chunk.id,
-            vector_type="main",
-            source_text=chunk.contextualized_text[:200],
-        ))
-
-        # Summary embedding (if available)
-        if metadata and metadata.summary:
-            summary_embedding = embedder.embed(metadata.summary)
-            summary_id = f"{chunk.id}_summary"
-            multi_vector_index.summary_index.add(summary_id, summary_embedding)
-            summary_count += 1
-
-            await metadata_store.add_vector_embedding(VectorEmbedding(
-                id=summary_id,
-                chunk_id=chunk.id,
-                vector_type="summary",
-                source_text=metadata.summary,
-            ))
-
-        # Question embeddings
-        for question in questions:
-            question_embedding = embedder.embed(question.question)
-            question_vector_id = f"q_{chunk.id}_{question.id}"
-            multi_vector_index.question_index.add(question_vector_id, question_embedding)
-            multi_vector_index._question_to_chunk[question_vector_id] = chunk.id
-
-            # Update question with vector ID
-            if question.id:
-                await metadata_store.update_question_vector_id(question.id, question_vector_id)
-
-            await metadata_store.add_vector_embedding(VectorEmbedding(
-                id=question_vector_id,
-                chunk_id=chunk.id,
-                vector_type="question",
-                source_text=question.question,
-                question_id=question.id,
-            ))
-
-            question_count += 1
-
-    # Save indices
-    multi_vector_index.save()
-    keyword_index.save()
-
-    # Update status
-    await metadata_store.update_document_status(doc_id, "indexed")
-
-    logger.info(
-        f"Indexed document {doc_id}: "
-        f"{main_count} main, {summary_count} summary, {question_count} question vectors"
-    )
+    try:
+        result = await document_processor.index_vectors(doc_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     return IndexingResponse(
         document_id=doc_id,
-        main_vectors=main_count,
-        summary_vectors=summary_count,
-        question_vectors=question_count,
+        main_vectors=result["main_vectors"],
+        summary_vectors=result["summary_vectors"],
+        question_vectors=result["question_vectors"],
         status="indexed",
     )
 

@@ -6,7 +6,7 @@ from typing import Any
 
 import pandas as pd
 
-from models.chunk import Chunk
+from models.chunk import Chunk, ChunkMetadata
 from parsers.base import ParseResult, HeadingInfo
 from enrichment.entity_extractor import EnrichmentResult
 from config.settings import settings
@@ -384,10 +384,9 @@ class Chunker:
         return texts
 
     def _split_text(self, text: str) -> list[str]:
-        """Split text into chunks with overlap, respecting sentence boundaries."""
+        """Split text into chunks, respecting paragraph and sentence boundaries."""
         chunks = []
         current_chunk = ""
-        overlap_text = ""  # Text to prepend from previous chunk
 
         # Split by paragraphs first
         paragraphs = text.split("\n\n")
@@ -397,74 +396,25 @@ class Chunker:
             if not para:
                 continue
 
-            # If starting a new chunk, prepend overlap from previous chunk
-            if not current_chunk and overlap_text and self.chunk_overlap > 0:
-                current_chunk = overlap_text + "\n\n"
-
             if len(current_chunk) + len(para) <= self.chunk_size:
                 current_chunk += para + "\n\n"
             else:
                 if current_chunk:
                     chunks.append(current_chunk.strip())
-                    # Extract overlap for next chunk
-                    overlap_text = self._extract_overlap(current_chunk.strip())
 
                 if len(para) > self.chunk_size:
                     # Split long paragraphs by sentences
                     long_para_chunks = self._split_long_paragraph(para)
-                    for i, lpc in enumerate(long_para_chunks):
-                        if i == 0 and overlap_text and self.chunk_overlap > 0:
-                            # Prepend overlap to first chunk of split paragraph
-                            chunks.append((overlap_text + "\n\n" + lpc).strip())
-                        else:
-                            chunks.append(lpc)
-                        # Update overlap for next chunk
-                        overlap_text = self._extract_overlap(lpc)
+                    for lpc in long_para_chunks:
+                        chunks.append(lpc)
                     current_chunk = ""
                 else:
-                    # Start new chunk with overlap + current paragraph
-                    if overlap_text and self.chunk_overlap > 0:
-                        current_chunk = overlap_text + "\n\n" + para + "\n\n"
-                    else:
-                        current_chunk = para + "\n\n"
+                    current_chunk = para + "\n\n"
 
         if current_chunk.strip():
             chunks.append(current_chunk.strip())
 
         return chunks
-
-    def _extract_overlap(self, text: str) -> str:
-        """Extract overlap text from end of chunk, respecting sentence boundaries.
-
-        Args:
-            text: The chunk text to extract overlap from
-
-        Returns:
-            Overlap text (up to chunk_overlap chars, at sentence boundary)
-        """
-        if not text or self.chunk_overlap <= 0:
-            return ""
-
-        if len(text) <= self.chunk_overlap:
-            return text
-
-        # Get last N characters
-        overlap_region = text[-self.chunk_overlap:]
-
-        # Try to find a sentence boundary (. ! ? followed by space)
-        for i, char in enumerate(overlap_region):
-            if char in '.!?' and i < len(overlap_region) - 1:
-                if i + 1 < len(overlap_region) and overlap_region[i + 1] in ' \n':
-                    # Start from after this sentence boundary
-                    return overlap_region[i + 2:].strip()
-
-        # Fallback: find word boundary (first space)
-        space_idx = overlap_region.find(' ')
-        if space_idx > 0 and space_idx < len(overlap_region) - 10:
-            return overlap_region[space_idx + 1:].strip()
-
-        # Last resort: return the whole overlap region
-        return overlap_region.strip()
 
     def _split_long_paragraph(self, text: str) -> list[str]:
         """Split a long paragraph by sentences."""
@@ -499,6 +449,7 @@ class Chunker:
         entities: dict[str, Any],
         prev_summary: str | None = None,
         next_summary: str | None = None,
+        contextual_description: str | None = None,
     ) -> str:
         """Build context prefix for a chunk including cross-chunk context.
 
@@ -509,6 +460,7 @@ class Chunker:
             entities: Document-level entities
             prev_summary: Summary of previous chunk for context
             next_summary: Summary of next chunk for context
+            contextual_description: LLM-generated description of this chunk's role
 
         Returns:
             Context string to prepend to chunk text
@@ -533,10 +485,18 @@ class Chunker:
             if next_summary:
                 lines.append(f"Following context: {next_summary}")
 
+        # Add LLM-generated contextual description
+        if contextual_description:
+            lines.append(f"Context: {contextual_description}")
+
         return "\n".join(lines)
 
     def _establish_chunk_links(self, chunks: list[Chunk]) -> None:
-        """Establish cross-chunk links and context summaries.
+        """Establish cross-chunk navigation links.
+
+        Sets prev_chunk_id / next_chunk_id for navigation.
+        Summaries are populated later by rebuild_contextualized_text()
+        using LLM enrichment results.
 
         Args:
             chunks: List of chunks to link together
@@ -545,19 +505,10 @@ class Chunker:
             return
 
         for i, chunk in enumerate(chunks):
-            # Set previous chunk reference
             if i > 0:
                 chunk.prev_chunk_id = chunks[i - 1].id
-                # Extract first ~100 chars as summary
-                prev_text = chunks[i - 1].text
-                chunk.prev_chunk_summary = prev_text[:100] + "..." if len(prev_text) > 100 else prev_text
-
-            # Set next chunk reference
             if i < len(chunks) - 1:
                 chunk.next_chunk_id = chunks[i + 1].id
-                # Extract first ~100 chars as summary
-                next_text = chunks[i + 1].text
-                chunk.next_chunk_summary = next_text[:100] + "..." if len(next_text) > 100 else next_text
 
     def _detect_heading(
         self, text: str, headings: list[HeadingInfo]
@@ -599,6 +550,73 @@ class Chunker:
         """Generate a unique chunk ID."""
         content = f"{document_id}:{chunk_index}"
         return hashlib.sha256(content.encode()).hexdigest()[:16]
+
+
+def rebuild_contextualized_text(
+    chunks: list[Chunk],
+    enrichment_results: list[tuple[ChunkMetadata | None, list]],
+    file_name: str,
+    doc_type: str,
+    entities: dict,
+) -> list[Chunk]:
+    """Rebuild each chunk's contextualized_text using LLM enrichment results.
+
+    Replaces raw text overlap with enrichment-derived context:
+    - Previous chunk's LLM-generated summary
+    - Next chunk's LLM-generated summary
+    - This chunk's contextual_description from enrichment
+
+    Args:
+        chunks: List of chunks to update
+        enrichment_results: Parallel list of (ChunkMetadata | None, questions) tuples
+        file_name: Document file name
+        doc_type: Detected document type
+        entities: Document-level entities dict
+
+    Returns:
+        The same chunks list, mutated with rebuilt contextualized_text
+    """
+    _chunker = Chunker()
+
+    for i, chunk in enumerate(chunks):
+        # Get enrichment data for prev/next/self
+        prev_summary = None
+        next_summary = None
+        contextual_desc = None
+
+        if i > 0 and i - 1 < len(enrichment_results):
+            prev_meta = enrichment_results[i - 1][0]
+            if prev_meta and prev_meta.summary:
+                prev_summary = prev_meta.summary
+
+        if i + 1 < len(enrichment_results):
+            next_meta = enrichment_results[i + 1][0]
+            if next_meta and next_meta.summary:
+                next_summary = next_meta.summary
+
+        if i < len(enrichment_results):
+            self_meta = enrichment_results[i][0]
+            if self_meta and self_meta.contextual_description:
+                contextual_desc = self_meta.contextual_description
+
+        # Rebuild context using _build_context with enrichment data
+        context = _chunker._build_context(
+            file_name=file_name,
+            doc_type=doc_type,
+            heading_path=chunk.heading_path or "",
+            entities=entities,
+            prev_summary=prev_summary,
+            next_summary=next_summary,
+            contextual_description=contextual_desc,
+        )
+
+        chunk.contextualized_text = f"{context}\n\n{chunk.text}"
+
+        # Update chunk summary fields with LLM-generated summaries
+        chunk.prev_chunk_summary = prev_summary
+        chunk.next_chunk_summary = next_summary
+
+    return chunks
 
 
 # Global instance

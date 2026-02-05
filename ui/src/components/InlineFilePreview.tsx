@@ -78,32 +78,6 @@ export default function InlineFilePreview({ file, onDelete, onStatusChange }: In
     },
   })
 
-  // Index document mutation
-  const indexMutation = useMutation({
-    mutationFn: () => {
-      if (!docId) throw new Error('No document ID')
-      return api.indexDocument(docId)
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['preview', file.path] })
-      queryClient.invalidateQueries({ queryKey: ['folder'] })
-      onStatusChange?.()
-    },
-  })
-
-  // Chunk tabular file mutation
-  const chunkTabularMutation = useMutation({
-    mutationFn: () => {
-      if (!docId) throw new Error('No document ID')
-      return api.chunkTabular(docId)
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['preview', file.path] })
-      queryClient.invalidateQueries({ queryKey: ['folder'] })
-      onStatusChange?.()
-    },
-  })
-
   // Enrich chunks mutation
   const enrichMutation = useMutation({
     mutationFn: () => {
@@ -267,8 +241,8 @@ export default function InlineFilePreview({ file, onDelete, onStatusChange }: In
 
               {/* Chunk */}
               <button
-                onClick={() => isTabular ? chunkTabularMutation.mutate() : chunkDocumentMutation.mutate()}
-                disabled={!canChunk || chunkTabularMutation.isPending || chunkDocumentMutation.isPending}
+                onClick={() => chunkDocumentMutation.mutate()}
+                disabled={!canChunk || chunkDocumentMutation.isPending}
                 className={`px-3 py-1.5 text-sm rounded transition-colors flex items-center gap-1 ${
                   chunkCompleted
                     ? 'bg-green-100 text-green-700'
@@ -277,7 +251,7 @@ export default function InlineFilePreview({ file, onDelete, onStatusChange }: In
                     : 'bg-gray-100 text-gray-400 cursor-not-allowed'
                 }`}
               >
-                {(chunkTabularMutation.isPending || chunkDocumentMutation.isPending) ? (
+                {chunkDocumentMutation.isPending ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
                 ) : chunkCompleted ? (
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -591,8 +565,8 @@ export default function InlineFilePreview({ file, onDelete, onStatusChange }: In
       )}
 
       {/* Mutation errors - shown at the bottom */}
-      {(detectLayoutMutation.error || extractTextMutation.error || indexMutation.error ||
-        chunkTabularMutation.error || chunkDocumentMutation.error || enrichMutation.error || indexVectorsMutation.error) && (
+      {(detectLayoutMutation.error || extractTextMutation.error ||
+        chunkDocumentMutation.error || enrichMutation.error || indexVectorsMutation.error) && (
         <div className="p-4 border-t bg-red-50">
           {detectLayoutMutation.error && (
             <div className="text-red-700 text-sm mb-2">
@@ -602,16 +576,6 @@ export default function InlineFilePreview({ file, onDelete, onStatusChange }: In
           {extractTextMutation.error && (
             <div className="text-red-700 text-sm mb-2">
               Text extraction failed: {(extractTextMutation.error as Error).message}
-            </div>
-          )}
-          {indexMutation.error && (
-            <div className="text-red-700 text-sm mb-2">
-              Indexing failed: {(indexMutation.error as Error).message}
-            </div>
-          )}
-          {chunkTabularMutation.error && (
-            <div className="text-red-700 text-sm mb-2">
-              Chunking failed: {(chunkTabularMutation.error as Error).message}
             </div>
           )}
           {chunkDocumentMutation.error && (

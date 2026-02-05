@@ -86,6 +86,13 @@ class HierarchicalChunker:
             layout_boxes=layout_boxes,
         )
 
+        # Establish inter-chunk navigation links
+        for i in range(len(chunks)):
+            if i > 0:
+                chunks[i].prev_chunk_id = chunks[i - 1].id
+            if i < len(chunks) - 1:
+                chunks[i].next_chunk_id = chunks[i + 1].id
+
         return chunks
 
     def _parse_markdown_tree(self, markdown: str) -> MarkdownNode:

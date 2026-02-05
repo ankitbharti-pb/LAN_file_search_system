@@ -58,11 +58,12 @@ class Settings(BaseSettings):
 
     # Chunking Configuration (larger chunks for better context)
     chunk_size: int = 1500  # ~300 tokens for better context
-    chunk_overlap: int = 200  # 13% overlap
+    chunk_overlap: int = 0  # Overlap replaced by LLM enrichment context
     max_chunk_size: int = 2500  # Allow larger semantic chunks
     enable_semantic_chunking: bool = True
     semantic_similarity_threshold: float = 0.72  # Lowered from 0.80 for better topic detection
     enable_chunk_links: bool = True  # Enable cross-chunk context linking
+    chunking_strategy: Literal["hierarchical", "paragraph"] = "hierarchical"
 
     # CSV Row-Batch Chunking
     csv_rows_per_chunk: int = 50  # Number of rows per data chunk

@@ -1,5 +1,6 @@
 """Document processor that orchestrates parsing, enrichment, and indexing."""
 
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -7,11 +8,12 @@ from pathlib import Path
 from config.settings import settings
 from core.utils import generate_document_id, compute_file_hash
 from models.document import Document
-from models.chunk import VectorEmbedding
+from models.chunk import Chunk, VectorEmbedding
 from parsers import parser_registry
 from parsers.base import ParseResult
 from enrichment import entity_extractor
-from indexing.chunker import chunker
+from enrichment.entity_extractor import EnrichmentResult
+from indexing.chunker import chunker, rebuild_contextualized_text
 from indexing.embedder import embedder
 from indexing.keyword_index import keyword_index
 from indexing.metadata_store import metadata_store
@@ -24,628 +26,85 @@ logger = logging.getLogger(__name__)
 
 
 class DocumentProcessor:
-    """Orchestrates the complete document processing pipeline."""
+    """Orchestrates the complete document processing pipeline.
 
-    async def process_file(self, file_path: Path) -> Document | None:
-        """Process a file through the complete pipeline.
+    Public step methods (the single flow):
+        chunk_document()  -> create chunks from markdown/tabular data
+        enrich_chunks()   -> LLM-enrich chunks with summaries & questions
+        index_vectors()   -> embed and index into multi-vector store
 
-        Steps:
-        1. Parse file
-        2. Enrich with LLM
-        3. Create chunks
-        4. Embed chunks
-        5. Index in vector store
-        6. Index in keyword store
-        7. Store metadata
-        """
-        logger.info(f"Processing file: {file_path}")
+    Reindex:
+        reindex_all()     -> chains step methods for every file
 
-        # Check if file is supported
-        if not parser_registry.is_supported(file_path):
-            logger.warning(f"Unsupported file type: {file_path}")
-            return None
+    Utilities:
+        remove_file(), save_indexes(), load_indexes()
+    """
 
-        try:
-            # Generate document ID and check for changes
-            document_id = generate_document_id(file_path)
-            file_hash = compute_file_hash(file_path)
+    # ------------------------------------------------------------------ #
+    #  Public step methods                                                 #
+    # ------------------------------------------------------------------ #
 
-            # Check if already indexed with same hash
-            existing = await metadata_store.get_document(document_id)
-            if existing and existing.file_hash == file_hash:
-                logger.info(f"File unchanged, skipping: {file_path}")
-                return existing
-
-            # If exists but changed, remove old data
-            if existing:
-                logger.info(f"File changed, reindexing: {file_path}")
-                await self.remove_file(file_path)
-
-            # Step 1: Parse
-            logger.debug(f"Parsing: {file_path}")
-            parser = parser_registry.get_parser(file_path)
-            parse_result = parser.parse(file_path)
-
-            # Step 2: Enrich with LLM
-            logger.debug(f"Enriching: {file_path}")
-            file_type = file_path.suffix.lower().lstrip(".")
-            enrichment = await entity_extractor.enrich(
-                parse_result=parse_result,
-                file_name=file_path.name,
-                file_type=file_type,
-            )
-
-            # Step 3: Create document model
-            document = Document(
-                id=document_id,
-                file_path=str(file_path.absolute()),
-                file_name=file_path.name,
-                file_type=file_type,
-                file_hash=file_hash,
-                detected_doc_type=enrichment.document_type,
-                summary=enrichment.summary,
-                entities=enrichment.entities,
-                key_topics=enrichment.key_topics,
-                table_descriptions=enrichment.table_descriptions,
-                indexed_at=datetime.utcnow(),
-                sheet_names=parse_result.sheet_names,
-                column_schema=parse_result.column_types,
-                row_count=parse_result.row_count,
-            )
-
-            # Step 4: Create chunks
-            logger.debug(f"Chunking: {file_path}")
-            is_tabular = file_type in ["csv", "xlsx", "xls"]
-            if is_tabular:
-                chunks = chunker.chunk_tabular(
-                    parse_result=parse_result,
-                    enrichment=enrichment,
-                    document_id=document_id,
-                    file_name=file_path.name,
-                )
-            else:
-                chunks = chunker.chunk_document(
-                    parse_result=parse_result,
-                    enrichment=enrichment,
-                    document_id=document_id,
-                    file_name=file_path.name,
-                )
-
-            # Free DataFrame memory after chunking
-            parse_result.dataframe = None
-
-            if not chunks:
-                logger.warning(f"No chunks created for: {file_path}")
-                return None
-
-            # Step 5: Store metadata first
-            logger.debug("Storing metadata")
-            await metadata_store.add_document(document)
-            await metadata_store.add_chunks(chunks)
-
-            # Step 6: Enrich chunks with summaries and questions
-            logger.debug(f"Enriching {len(chunks)} chunks with LLM")
-            doc_context = {
-                "file_name": file_path.name,
-                "detected_doc_type": enrichment.document_type,
-                "summary": enrichment.summary,
-                "entities": enrichment.entities,
-            }
-
-            try:
-                enrichment_results = await chunk_enricher.enrich_batch(chunks, doc_context)
-                for (metadata, questions), chunk in zip(enrichment_results, chunks):
-                    if metadata:
-                        await metadata_store.add_chunk_metadata(metadata)
-                    if questions:
-                        await metadata_store.add_chunk_questions(chunk.id, questions)
-            except Exception as e:
-                logger.warning(f"Chunk enrichment failed, continuing without: {e}")
-                enrichment_results = [(None, []) for _ in chunks]
-
-            # Step 7: Index in multi-vector store
-            logger.debug("Indexing in multi-vector store")
-            main_count = 0
-            summary_count = 0
-            question_count = 0
-
-            for i, chunk in enumerate(chunks):
-                # Main embedding
-                main_emb = embedder.embed(chunk.contextualized_text)
-                multi_vector_index.main_index.add(chunk.id, main_emb)
-                keyword_index.add(chunk.id, chunk.text)
-                main_count += 1
-
-                # Summary and question embeddings
-                if i < len(enrichment_results):
-                    metadata, questions = enrichment_results[i]
-
-                    if metadata and metadata.summary:
-                        summary_emb = embedder.embed(metadata.summary)
-                        summary_id = f"{chunk.id}_summary"
-                        multi_vector_index.summary_index.add(summary_id, summary_emb)
-                        summary_count += 1
-
-                    for q in questions:
-                        q_emb = embedder.embed(q.question)
-                        q_vector_id = f"q_{chunk.id}_{q.id}"
-                        multi_vector_index.question_index.add(q_vector_id, q_emb)
-                        multi_vector_index._question_to_chunk[q_vector_id] = chunk.id
-                        question_count += 1
-
-            # Save indexes
-            multi_vector_index.save()
-            keyword_index.save()
-
-            logger.info(
-                f"Successfully indexed {file_path.name}: "
-                f"{len(chunks)} chunks, {main_count} main, "
-                f"{summary_count} summary, {question_count} question vectors"
-            )
-
-            return document
-
-        except Exception as e:
-            logger.error(f"Failed to process {file_path}: {e}", exc_info=True)
-            raise
-
-    async def remove_file(self, file_path: Path) -> bool:
-        """Remove a file from all indexes."""
-        document_id = generate_document_id(file_path)
-
-        logger.info(f"Removing from index: {file_path}")
-
-        try:
-            # Get chunks for this document
-            chunks = await metadata_store.get_chunks_by_document(document_id)
-            chunk_ids = [c.id for c in chunks]
-
-            if chunk_ids:
-                # Remove from keyword index
-                keyword_index.remove(chunk_ids)
-
-                # Remove from multi-vector index
-                for chunk_id in chunk_ids:
-                    multi_vector_index.remove_chunk(chunk_id)
-
-                # Remove chunks from metadata store
-                await metadata_store.delete_chunks_by_document(document_id)
-
-            # Remove document from metadata store
-            result = await metadata_store.delete_document(document_id)
-
-            logger.info(f"Removed {len(chunk_ids)} chunks for: {file_path}")
-            return result
-
-        except Exception as e:
-            logger.error(f"Failed to remove {file_path}: {e}")
-            return False
-
-    async def reindex_all(self) -> dict:
-        """Reindex all files in the watch folder using multi-vector indexing."""
-        logger.info("Starting full reindex with multi-vector indexing")
-
-        # Clear ALL indexes
-        keyword_index.clear()
-        multi_vector_index.clear()
-
-        # Clear all metadata from database
-        await metadata_store.clear_all()
-
-        # Get all supported files
-        watch_folder = settings.watch_folder
-        if not watch_folder.exists():
-            logger.warning(f"Watch folder does not exist: {watch_folder}")
-            return {"processed": 0, "failed": 0, "skipped": 0}
-
-        processed = 0
-        failed = 0
-        skipped = 0
-
-        for ext in parser_registry.supported_extensions:
-            for file_path in watch_folder.rglob(f"*.{ext}"):
-                try:
-                    result = await self._reindex_file_advanced(file_path)
-                    if result:
-                        processed += 1
-                    else:
-                        skipped += 1
-                except Exception as e:
-                    logger.error(f"Failed to reindex {file_path}: {e}", exc_info=True)
-                    failed += 1
-
-        # Save all indexes
-        keyword_index.save()
-        multi_vector_index.save()
-
-        logger.info(f"Reindex complete: {processed} processed, {failed} failed, {skipped} skipped")
-
-        return {"processed": processed, "failed": failed, "skipped": skipped}
-
-    async def _reindex_file_advanced(self, file_path: Path) -> bool:
-        """Reindex a single file using the advanced multi-vector workflow.
-
-        Steps:
-        1. Parse file
-        2. Create document with enrichment
-        3. Create chunks using hierarchical chunker
-        4. Enrich chunks with summaries and questions
-        5. Index into multi-vector index
-        """
-        logger.info(f"Reindexing (advanced): {file_path}")
-
-        # Generate document ID
-        document_id = generate_document_id(file_path)
-        file_hash = compute_file_hash(file_path)
-
-        # Step 1: Parse
-        parser = parser_registry.get_parser(file_path)
-        parse_result = parser.parse(file_path)
-
-        if not parse_result.text:
-            logger.warning(f"No text extracted from: {file_path}")
-            return False
-
-        # Step 2: Create document enrichment
-        file_type = file_path.suffix.lower().lstrip(".")
-        enrichment = await entity_extractor.enrich(
-            parse_result=parse_result,
-            file_name=file_path.name,
-            file_type=file_type,
-        )
-
-        # Create document record
-        document = Document(
-            id=document_id,
-            file_path=str(file_path.absolute()),
-            file_name=file_path.name,
-            file_type=file_type,
-            file_hash=file_hash,
-            detected_doc_type=enrichment.document_type,
-            summary=enrichment.summary,
-            entities=enrichment.entities,
-            key_topics=enrichment.key_topics,
-            table_descriptions=enrichment.table_descriptions,
-            indexed_at=datetime.utcnow(),
-            processing_status="processing",
-            sheet_names=parse_result.sheet_names,
-            column_schema=parse_result.column_types,
-            row_count=parse_result.row_count,
-        )
-        await metadata_store.add_document(document)
-
-        # Step 3: Create chunks using hierarchical chunker
-        # Use markdown from parse result, or plain text if no markdown
-        markdown = parse_result.markdown or parse_result.text
-
-        doc_chunks = hierarchical_chunker.chunk_document(
-            markdown=markdown,
-            layout_data=None,
-            document_id=document_id,
-            file_name=file_path.name,
-            detected_doc_type=enrichment.document_type,
-            entities=enrichment.entities,
-        )
-
-        if not doc_chunks:
-            logger.warning(f"No chunks created for: {file_path}")
-            await metadata_store.update_document_status(document_id, "failed")
-            return False
-
-        # Save chunks to database
-        await metadata_store.add_chunks(doc_chunks)
-
-        # Step 4: Enrich chunks with summaries and questions
-        doc_context = {
-            "file_name": file_path.name,
-            "detected_doc_type": enrichment.document_type,
-            "summary": enrichment.summary,
-            "entities": enrichment.entities,
-        }
-
-        try:
-            enrichment_results = await chunk_enricher.enrich_batch(doc_chunks, doc_context)
-
-            # Save enrichment results
-            total_questions = 0
-            for (metadata, questions), chunk in zip(enrichment_results, doc_chunks):
-                await metadata_store.add_chunk_metadata(metadata)
-                if questions:
-                    await metadata_store.add_chunk_questions(chunk.id, questions)
-                    total_questions += len(questions)
-        except Exception as e:
-            logger.warning(f"Chunk enrichment failed for {file_path}, continuing without: {e}")
-            enrichment_results = [(None, []) for _ in doc_chunks]
-            total_questions = 0
-
-        # Step 5: Index into multi-vector index
-        main_count = 0
-        summary_count = 0
-        question_count = 0
-
-        for i, chunk in enumerate(doc_chunks):
-            # Main embedding (contextualized text)
-            main_emb = embedder.embed(chunk.contextualized_text)
-            multi_vector_index.main_index.add(chunk.id, main_emb)
-            keyword_index.add(chunk.id, chunk.text)
-            main_count += 1
-
-            # Summary embedding (if enrichment succeeded)
-            if i < len(enrichment_results):
-                metadata, questions = enrichment_results[i]
-
-                if metadata and metadata.summary:
-                    summary_emb = embedder.embed(metadata.summary)
-                    summary_id = f"{chunk.id}_summary"
-                    multi_vector_index.summary_index.add(summary_id, summary_emb)
-                    summary_count += 1
-
-                # Question embeddings
-                for q in questions:
-                    q_emb = embedder.embed(q.question)
-                    q_vector_id = f"q_{chunk.id}_{q.id}"
-                    multi_vector_index.question_index.add(q_vector_id, q_emb)
-                    multi_vector_index._question_to_chunk[q_vector_id] = chunk.id
-                    question_count += 1
-
-        # Update document status
-        await metadata_store.update_document_status(document_id, "indexed")
-
-        logger.info(
-            f"Indexed {file_path.name}: {len(doc_chunks)} chunks, "
-            f"{main_count} main, {summary_count} summary, {question_count} question vectors"
-        )
-
-        return True
-
-    async def save_indexes(self) -> None:
-        """Save all indexes to disk."""
-        logger.info("Saving indexes to disk")
-        keyword_index.save()
-        multi_vector_index.save()
-        logger.info("Indexes saved")
-
-    async def load_indexes(self) -> None:
-        """Load all indexes from disk."""
-        logger.info("Loading indexes from disk")
-        keyword_index.load()
-        multi_vector_index.load()
-        logger.info("Indexes loaded")
-
-    async def index_from_markdown(self, document_id: str, markdown: str) -> Document | None:
-        """Index a document from its extracted/reviewed markdown.
-
-        This is used for the manual processing workflow where:
-        1. Layout detection and text extraction have been completed
-        2. The user has reviewed/edited the markdown
-        3. Now we index it for search
-
-        Steps:
-        1. Get document metadata from database
-        2. Create ParseResult from markdown
-        3. Enrich with LLM
-        4. Create chunks
-        5. Enrich chunks with summaries and questions
-        6. Index in multi-vector store (main, summary, question)
-        7. Index in keyword store
-        8. Update document with enrichment data
-        """
-        logger.info(f"Indexing document from markdown: {document_id}")
-
-        # Get document from database
-        doc = await metadata_store.get_document(document_id)
-        if not doc:
-            raise ValueError(f"Document not found: {document_id}")
-
-        file_path = Path(doc.file_path)
-        file_type = doc.file_type
-
-        try:
-            # Remove existing chunks if reindexing
-            chunks = await metadata_store.get_chunks_by_document(document_id)
-            if chunks:
-                chunk_ids = [c.id for c in chunks]
-                keyword_index.remove(chunk_ids)
-                for chunk_id in chunk_ids:
-                    multi_vector_index.remove_chunk(chunk_id)
-                await metadata_store.delete_chunks_by_document(document_id)
-
-            # Create minimal ParseResult from markdown
-            parse_result = ParseResult(
-                text=markdown,
-                tables=[],
-                headings=[],
-            )
-
-            # Enrich with LLM
-            logger.debug(f"Enriching: {doc.file_name}")
-            enrichment = await entity_extractor.enrich(
-                parse_result=parse_result,
-                file_name=doc.file_name,
-                file_type=file_type,
-            )
-
-            # Create chunks
-            logger.debug(f"Chunking: {doc.file_name}")
-            is_tabular = file_type in ["csv", "xlsx", "xls"]
-            if is_tabular:
-                doc_chunks = chunker.chunk_tabular(
-                    parse_result=parse_result,
-                    enrichment=enrichment,
-                    document_id=document_id,
-                    file_name=doc.file_name,
-                )
-            else:
-                doc_chunks = chunker.chunk_document(
-                    parse_result=parse_result,
-                    enrichment=enrichment,
-                    document_id=document_id,
-                    file_name=doc.file_name,
-                )
-
-            if not doc_chunks:
-                logger.warning(f"No chunks created for: {doc.file_name}")
-                return None
-
-            # Add chunks to metadata store first
-            await metadata_store.add_chunks(doc_chunks)
-
-            # Enrich chunks with summaries and questions
-            logger.debug(f"Enriching {len(doc_chunks)} chunks with LLM")
-            doc_context = {
-                "file_name": doc.file_name,
-                "detected_doc_type": enrichment.document_type,
-                "summary": enrichment.summary,
-                "entities": enrichment.entities,
-            }
-
-            try:
-                enrichment_results = await chunk_enricher.enrich_batch(doc_chunks, doc_context)
-
-                # Save enrichment results to database
-                total_questions = 0
-                for (metadata, questions), chunk in zip(enrichment_results, doc_chunks):
-                    if metadata:
-                        await metadata_store.add_chunk_metadata(metadata)
-                    if questions:
-                        await metadata_store.add_chunk_questions(chunk.id, questions)
-                        total_questions += len(questions)
-            except Exception as e:
-                logger.warning(f"Chunk enrichment failed, continuing without: {e}")
-                enrichment_results = [(None, []) for _ in doc_chunks]
-                total_questions = 0
-
-            # Index in multi-vector store
-            logger.debug("Indexing in multi-vector store")
-            main_count = 0
-            summary_count = 0
-            question_count = 0
-
-            for i, chunk in enumerate(doc_chunks):
-                # Main embedding (contextualized text)
-                main_emb = embedder.embed(chunk.contextualized_text)
-                multi_vector_index.main_index.add(chunk.id, main_emb)
-                keyword_index.add(chunk.id, chunk.text)
-                main_count += 1
-
-                # Summary and question embeddings (if enrichment succeeded)
-                if i < len(enrichment_results):
-                    metadata, questions = enrichment_results[i]
-
-                    if metadata and metadata.summary:
-                        summary_emb = embedder.embed(metadata.summary)
-                        summary_id = f"{chunk.id}_summary"
-                        multi_vector_index.summary_index.add(summary_id, summary_emb)
-                        summary_count += 1
-
-                    # Question embeddings
-                    for q in questions:
-                        q_emb = embedder.embed(q.question)
-                        q_vector_id = f"q_{chunk.id}_{q.id}"
-                        multi_vector_index.question_index.add(q_vector_id, q_emb)
-                        multi_vector_index._question_to_chunk[q_vector_id] = chunk.id
-                        question_count += 1
-
-            # Update document with enrichment data
-            await metadata_store.update_document_enrichment(
-                document_id=document_id,
-                detected_doc_type=enrichment.document_type,
-                summary=enrichment.summary,
-                entities=enrichment.entities,
-                key_topics=enrichment.key_topics,
-                table_descriptions=enrichment.table_descriptions,
-            )
-
-            logger.info(
-                f"Successfully indexed {doc.file_name}: "
-                f"{len(doc_chunks)} chunks, {main_count} main, "
-                f"{summary_count} summary, {question_count} question vectors"
-            )
-
-            # Save indexes
-            multi_vector_index.save()
-            keyword_index.save()
-
-            # Return the updated document
-            return await metadata_store.get_document(document_id)
-
-        except Exception as e:
-            logger.error(f"Failed to index {document_id}: {e}", exc_info=True)
-            raise
-
-    async def chunk_document_advanced(
+    async def chunk_document(
         self,
         document_id: str,
         markdown: str | None = None,
     ) -> int:
-        """Create hierarchical + semantic chunks for a document.
+        """Create chunks for a document (unified: tabular, paragraph, hierarchical).
 
         Args:
             document_id: Document ID to chunk
-            markdown: Optional markdown content (if not provided, uses reviewed/extracted from DB)
+            markdown: Optional markdown content (if not provided, reads from DB)
 
         Returns:
             Number of chunks created
         """
-        logger.info(f"Running advanced chunking for: {document_id}")
+        logger.info(f"Chunking document: {document_id}")
 
-        # Get document
         doc = await metadata_store.get_document(document_id)
         if not doc:
             raise ValueError(f"Document not found: {document_id}")
 
-        # Get markdown if not provided
-        if markdown is None:
+        is_tabular = (doc.file_type or "").lower() in ("csv", "xlsx", "xls")
+
+        # Resolve markdown from DB if not provided (non-tabular only)
+        if not is_tabular and markdown is None:
             markdown_data = await metadata_store.get_document_markdown(document_id)
             if markdown_data:
                 markdown = markdown_data.get("reviewed_markdown") or markdown_data.get("extracted_markdown")
 
-        if not markdown:
+        if not is_tabular and not markdown:
             raise ValueError(f"No markdown content available for: {document_id}")
 
-        # Parse layout data
-        import json
-        layout_data = None
-        if doc.layout_data:
-            try:
-                layout_data = json.loads(doc.layout_data)
-            except json.JSONDecodeError:
-                logger.warning(f"Failed to parse layout data for {document_id}")
-
-        # Delete existing chunks
-        chunks = await metadata_store.get_chunks_by_document(document_id)
-        if chunks:
-            chunk_ids = [c.id for c in chunks]
+        # Delete existing chunks + vectors
+        existing = await metadata_store.get_chunks_by_document(document_id)
+        if existing:
+            chunk_ids = [c.id for c in existing]
             keyword_index.remove(chunk_ids)
             for cid in chunk_ids:
                 multi_vector_index.remove_chunk(cid)
             await metadata_store.delete_chunks_by_document(document_id)
 
-        # Hierarchical chunking
-        doc_chunks = hierarchical_chunker.chunk_document(
-            markdown=markdown,
-            layout_data=layout_data,
-            document_id=document_id,
-            file_name=doc.file_name,
-            detected_doc_type=doc.detected_doc_type,
-            entities=doc.entities,
-        )
+        # Dispatch to strategy
+        if is_tabular:
+            doc_chunks = self._chunk_tabular(doc)
+        elif settings.chunking_strategy == "paragraph":
+            doc_chunks = self._chunk_paragraph(doc, markdown)
+        else:  # "hierarchical" (default)
+            doc_chunks = self._chunk_hierarchical(doc, document_id, markdown)
 
-        # Semantic chunking (refine large chunks)
-        if settings.enable_semantic_chunking and doc_chunks:
-            semantic_chunker = create_semantic_chunker(embedder)
-            doc_chunks = semantic_chunker.refine_chunks(doc_chunks, settings.max_chunk_size)
+        if not doc_chunks:
+            logger.warning(f"No chunks created for: {document_id}")
+            await metadata_store.update_document_status(document_id, "failed")
+            return 0
 
-        # Save chunks
+        # Save chunks + update status
         await metadata_store.add_chunks(doc_chunks)
-
-        # Update status
         await metadata_store.update_document_status(document_id, "chunked")
 
         logger.info(f"Created {len(doc_chunks)} chunks for {document_id}")
         return len(doc_chunks)
 
-    async def enrich_chunks_advanced(self, document_id: str) -> tuple[int, int]:
+    async def enrich_chunks(self, document_id: str) -> tuple[int, int]:
         """Enrich document chunks with LLM-generated metadata.
 
         Args:
@@ -656,17 +115,14 @@ class DocumentProcessor:
         """
         logger.info(f"Enriching chunks for: {document_id}")
 
-        # Get document
         doc = await metadata_store.get_document(document_id)
         if not doc:
             raise ValueError(f"Document not found: {document_id}")
 
-        # Get chunks
         chunks = await metadata_store.get_chunks_by_document(document_id)
         if not chunks:
             raise ValueError(f"No chunks found for: {document_id}")
 
-        # Prepare context
         doc_context = {
             "file_name": doc.file_name,
             "detected_doc_type": doc.detected_doc_type,
@@ -674,10 +130,8 @@ class DocumentProcessor:
             "entities": doc.entities,
         }
 
-        # Enrich
         results = await chunk_enricher.enrich_batch(chunks, doc_context)
 
-        # Save results
         total_questions = 0
         for (metadata, questions), chunk in zip(results, chunks):
             await metadata_store.add_chunk_metadata(metadata)
@@ -685,24 +139,32 @@ class DocumentProcessor:
                 await metadata_store.add_chunk_questions(chunk.id, questions)
                 total_questions += len(questions)
 
-        # Update status
+        # Rebuild contextualized_text with enrichment context
+        chunks = rebuild_contextualized_text(
+            chunks, results,
+            file_name=doc.file_name,
+            doc_type=doc.detected_doc_type,
+            entities=doc.entities,
+        )
+        await metadata_store.update_chunks_contextualized_text(chunks)
+
         await metadata_store.update_document_status(document_id, "enriched")
 
         logger.info(f"Enriched {len(chunks)} chunks with {total_questions} questions")
         return len(chunks), total_questions
 
-    async def index_multi_vector(self, document_id: str) -> dict:
+    async def index_vectors(self, document_id: str, save: bool = True) -> dict:
         """Build multi-vector index for a document.
 
         Args:
             document_id: Document ID to index
+            save: Whether to persist indexes to disk (False for batch reindex)
 
         Returns:
             Dict with counts of vectors created
         """
         logger.info(f"Building multi-vector index for: {document_id}")
 
-        # Get chunks
         chunks = await metadata_store.get_chunks_by_document(document_id)
         if not chunks:
             raise ValueError(f"No chunks found for: {document_id}")
@@ -712,7 +174,6 @@ class DocumentProcessor:
         question_count = 0
 
         for chunk in chunks:
-            # Get metadata and questions
             metadata = await metadata_store.get_chunk_metadata(chunk.id)
             questions = await metadata_store.get_chunk_questions(chunk.id)
 
@@ -722,7 +183,6 @@ class DocumentProcessor:
             keyword_index.add(chunk.id, chunk.text)
             main_count += 1
 
-            # Track embedding
             await metadata_store.add_vector_embedding(VectorEmbedding(
                 id=chunk.id,
                 chunk_id=chunk.id,
@@ -749,6 +209,7 @@ class DocumentProcessor:
                 q_emb = embedder.embed(q.question)
                 q_vector_id = f"q_{chunk.id}_{q.id}"
                 multi_vector_index.question_index.add(q_vector_id, q_emb)
+                multi_vector_index._question_to_chunk[q_vector_id] = chunk.id
 
                 if q.id:
                     await metadata_store.update_question_vector_id(q.id, q_vector_id)
@@ -762,11 +223,10 @@ class DocumentProcessor:
                 ))
                 question_count += 1
 
-        # Save indices
-        multi_vector_index.save()
-        keyword_index.save()
+        if save:
+            multi_vector_index.save()
+            keyword_index.save()
 
-        # Update status
         await metadata_store.update_document_status(document_id, "indexed")
 
         logger.info(
@@ -779,6 +239,255 @@ class DocumentProcessor:
             "summary_vectors": summary_count,
             "question_vectors": question_count,
         }
+
+    # ------------------------------------------------------------------ #
+    #  Reindex                                                             #
+    # ------------------------------------------------------------------ #
+
+    async def reindex_all(self) -> dict:
+        """Reindex all files in the watch folder using step methods."""
+        logger.info("Starting full reindex")
+
+        # Clear ALL indexes
+        keyword_index.clear()
+        multi_vector_index.clear()
+        await metadata_store.clear_all()
+
+        watch_folder = settings.watch_folder
+        if not watch_folder.exists():
+            logger.warning(f"Watch folder does not exist: {watch_folder}")
+            return {"processed": 0, "failed": 0, "skipped": 0}
+
+        processed = 0
+        failed = 0
+        skipped = 0
+
+        for ext in parser_registry.supported_extensions:
+            for file_path in watch_folder.rglob(f"*.{ext}"):
+                try:
+                    result = await self._reindex_single_file(file_path)
+                    if result:
+                        processed += 1
+                    else:
+                        skipped += 1
+                except Exception as e:
+                    logger.error(f"Failed to reindex {file_path}: {e}", exc_info=True)
+                    failed += 1
+
+        # Save indexes once at the end
+        keyword_index.save()
+        multi_vector_index.save()
+
+        logger.info(f"Reindex complete: {processed} processed, {failed} failed, {skipped} skipped")
+        return {"processed": processed, "failed": failed, "skipped": skipped}
+
+    # ------------------------------------------------------------------ #
+    #  Utilities                                                           #
+    # ------------------------------------------------------------------ #
+
+    async def remove_file(self, file_path: Path, save: bool = True) -> bool:
+        """Remove a file from all indexes, DB, and processing artifacts.
+
+        Args:
+            file_path: Path to the file being removed
+            save: Whether to persist indexes to disk (False for batch operations)
+        """
+        document_id = generate_document_id(file_path)
+
+        logger.info(f"Removing from index: {file_path}")
+
+        try:
+            chunks = await metadata_store.get_chunks_by_document(document_id)
+            chunk_ids = [c.id for c in chunks]
+
+            if chunk_ids:
+                keyword_index.remove(chunk_ids)
+                for chunk_id in chunk_ids:
+                    multi_vector_index.remove_chunk(chunk_id)
+                await metadata_store.delete_chunks_by_document(document_id)
+
+            # Delete page records
+            await metadata_store.delete_pages(document_id)
+
+            # Delete document record
+            result = await metadata_store.delete_document(document_id)
+
+            # Clean up processing directory
+            processing_dir = settings.data_folder / "processing" / document_id
+            if processing_dir.exists():
+                import shutil
+                shutil.rmtree(processing_dir)
+
+            if save:
+                keyword_index.save()
+                multi_vector_index.save()
+
+            logger.info(f"Removed {len(chunk_ids)} chunks for: {file_path}")
+            return result
+
+        except Exception as e:
+            logger.error(f"Failed to remove {file_path}: {e}")
+            return False
+
+    async def save_indexes(self) -> None:
+        """Save all indexes to disk."""
+        logger.info("Saving indexes to disk")
+        keyword_index.save()
+        multi_vector_index.save()
+        logger.info("Indexes saved")
+
+    async def load_indexes(self) -> None:
+        """Load all indexes from disk."""
+        logger.info("Loading indexes from disk")
+        keyword_index.load()
+        multi_vector_index.load()
+        logger.info("Indexes loaded")
+
+    # ------------------------------------------------------------------ #
+    #  Private helpers — chunking strategies                               #
+    # ------------------------------------------------------------------ #
+
+    def _chunk_tabular(self, doc: Document) -> list[Chunk]:
+        """Chunk a tabular file (CSV/Excel) by re-parsing to get DataFrame."""
+        file_path = Path(doc.file_path)
+        parser = parser_registry.get_parser(file_path)
+        parse_result = parser.parse(file_path)
+
+        enrichment = EnrichmentResult(
+            document_type=doc.detected_doc_type or "tabular data",
+            summary=doc.summary or f"Tabular file: {doc.file_name}",
+            entities=doc.entities or {},
+            key_topics=doc.key_topics or [],
+            table_descriptions=doc.table_descriptions or [],
+        )
+
+        chunks = chunker.chunk_tabular(
+            parse_result=parse_result,
+            enrichment=enrichment,
+            document_id=doc.id,
+            file_name=doc.file_name,
+        )
+        return chunks
+
+    def _chunk_paragraph(self, doc: Document, markdown: str) -> list[Chunk]:
+        """Chunk using the paragraph-based chunker."""
+        parse_result = ParseResult(
+            text=markdown,
+            tables=[],
+            headings=[],
+        )
+
+        enrichment = EnrichmentResult(
+            document_type=doc.detected_doc_type or "unknown",
+            summary=doc.summary or "",
+            entities=doc.entities or {},
+            key_topics=doc.key_topics or [],
+            table_descriptions=doc.table_descriptions or [],
+        )
+
+        chunks = chunker.chunk_document(
+            parse_result=parse_result,
+            enrichment=enrichment,
+            document_id=doc.id,
+            file_name=doc.file_name,
+        )
+        return chunks
+
+    def _chunk_hierarchical(self, doc: Document, document_id: str, markdown: str) -> list[Chunk]:
+        """Chunk using the hierarchical markdown-tree chunker."""
+        layout_data = None
+        if doc.layout_data:
+            try:
+                layout_data = json.loads(doc.layout_data)
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse layout data for {document_id}")
+
+        doc_chunks = hierarchical_chunker.chunk_document(
+            markdown=markdown,
+            layout_data=layout_data,
+            document_id=document_id,
+            file_name=doc.file_name,
+            detected_doc_type=doc.detected_doc_type,
+            entities=doc.entities,
+        )
+
+        # Semantic chunking (refine large chunks)
+        if settings.enable_semantic_chunking and doc_chunks:
+            semantic_chunker = create_semantic_chunker(embedder)
+            doc_chunks = semantic_chunker.refine_chunks(doc_chunks, settings.max_chunk_size)
+
+        return doc_chunks
+
+    # ------------------------------------------------------------------ #
+    #  Private helpers — reindex single file                               #
+    # ------------------------------------------------------------------ #
+
+    async def _reindex_single_file(self, file_path: Path) -> bool:
+        """Reindex a single file: parse -> doc-enrich -> chunk -> enrich -> index."""
+        logger.info(f"Reindexing: {file_path}")
+
+        document_id = generate_document_id(file_path)
+        file_hash = compute_file_hash(file_path)
+
+        # Step 1: Parse
+        parser = parser_registry.get_parser(file_path)
+        parse_result = parser.parse(file_path)
+
+        if not parse_result.text:
+            logger.warning(f"No text extracted from: {file_path}")
+            return False
+
+        # Step 2: Document-level enrichment
+        file_type = file_path.suffix.lower().lstrip(".")
+        enrichment = await entity_extractor.enrich(
+            parse_result=parse_result,
+            file_name=file_path.name,
+            file_type=file_type,
+        )
+
+        # Step 3: Create + store Document
+        document = Document(
+            id=document_id,
+            file_path=str(file_path.absolute()),
+            file_name=file_path.name,
+            file_type=file_type,
+            file_hash=file_hash,
+            detected_doc_type=enrichment.document_type,
+            summary=enrichment.summary,
+            entities=enrichment.entities,
+            key_topics=enrichment.key_topics,
+            table_descriptions=enrichment.table_descriptions,
+            indexed_at=datetime.utcnow(),
+            processing_status="processing",
+            sheet_names=parse_result.sheet_names,
+            column_schema=parse_result.column_types,
+            row_count=parse_result.row_count,
+        )
+        await metadata_store.add_document(document)
+
+        # Step 4: Store markdown for non-tabular files
+        markdown = parse_result.markdown if hasattr(parse_result, "markdown") and parse_result.markdown else parse_result.text
+        is_tabular = file_type in ("csv", "xlsx", "xls")
+        if not is_tabular:
+            await metadata_store.update_document_markdown(document_id, markdown)
+
+        # Step 5-7: chunk -> enrich -> index (using step methods)
+        try:
+            await self.chunk_document(document_id, markdown if not is_tabular else None)
+        except ValueError as e:
+            logger.warning(f"Chunking failed for {file_path}: {e}")
+            await metadata_store.update_document_status(document_id, "failed")
+            return False
+
+        try:
+            await self.enrich_chunks(document_id)
+        except Exception as e:
+            logger.warning(f"Chunk enrichment failed for {file_path}, continuing: {e}")
+
+        await self.index_vectors(document_id, save=False)
+
+        logger.info(f"Reindexed: {file_path.name}")
+        return True
 
 
 # Global instance

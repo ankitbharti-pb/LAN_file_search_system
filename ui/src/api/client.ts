@@ -443,17 +443,9 @@ class APIClient {
     return this.fetch(`/processing/${docId}/extract-text`, { method: 'POST' })
   }
 
-  async indexDocument(docId: string): Promise<{ status: string }> {
-    return this.fetch(`/processing/${docId}/index`, { method: 'POST' })
-  }
-
   // Chunking API
   async chunkDocument(docId: string): Promise<ChunkingResponse> {
     return this.fetch<ChunkingResponse>(`/processing/${docId}/chunk`, { method: 'POST' })
-  }
-
-  async chunkTabular(docId: string): Promise<{ document_id: string; chunk_count: number; status: string; message: string }> {
-    return this.fetch(`/processing/${docId}/chunk-tabular`, { method: 'POST' })
   }
 
   async enrichChunks(docId: string): Promise<EnrichmentResponse> {

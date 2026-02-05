@@ -57,10 +57,10 @@ class Chunk(BaseModel):
         default=None, description="Next chunk ID for context continuity"
     )
     prev_chunk_summary: str | None = Field(
-        default=None, description="Summary of previous chunk for context (first ~100 chars)"
+        default=None, description="LLM-generated summary of the previous chunk"
     )
     next_chunk_summary: str | None = Field(
-        default=None, description="Summary of next chunk for context (first ~100 chars)"
+        default=None, description="LLM-generated summary of the next chunk"
     )
 
 
