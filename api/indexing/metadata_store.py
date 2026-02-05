@@ -16,7 +16,20 @@ class MetadataStore:
 
     def __init__(self, db_path: Path | None = None):
         self.db_path = db_path or settings.database_path
-        self._connection: aiosqlite.Connection | None = None
+        self._db: aiosqlite.Connection | None = None
+
+    async def _get_db(self) -> aiosqlite.Connection:
+        """Get or create a persistent database connection for reads."""
+        if self._db is None:
+            self._db = await aiosqlite.connect(self.db_path)
+            self._db.row_factory = aiosqlite.Row
+        return self._db
+
+    async def close(self) -> None:
+        """Close the persistent database connection."""
+        if self._db is not None:
+            await self._db.close()
+            self._db = None
 
     async def initialize(self) -> None:
         """Create database and tables if they don't exist."""
@@ -96,6 +109,7 @@ class MetadataStore:
                     entities TEXT,
                     category TEXT,
                     contextual_description TEXT,
+                    temporal_context TEXT,
                     enriched_at TEXT,
                     FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
                 )
@@ -175,6 +189,13 @@ class MetadataStore:
             for col_name, col_def in new_chunk_columns:
                 if col_name not in existing_chunk_columns:
                     await db.execute(f"ALTER TABLE chunks ADD COLUMN {col_name} {col_def}")
+
+            # Migrate chunk_metadata table: add temporal_context column
+            cursor = await db.execute("PRAGMA table_info(chunk_metadata)")
+            existing_meta_columns = {row[1] for row in await cursor.fetchall()}
+
+            if "temporal_context" not in existing_meta_columns:
+                await db.execute("ALTER TABLE chunk_metadata ADD COLUMN temporal_context TEXT")
 
             # Migrate document_pages table: add new columns for filter comparison
             cursor = await db.execute("PRAGMA table_info(document_pages)")
@@ -279,17 +300,16 @@ class MetadataStore:
 
     async def get_document(self, document_id: str) -> Document | None:
         """Get a document by ID."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT * FROM documents WHERE id = ?", (document_id,)
-            )
-            row = await cursor.fetchone()
+        db = await self._get_db()
+        cursor = await db.execute(
+            "SELECT * FROM documents WHERE id = ?", (document_id,)
+        )
+        row = await cursor.fetchone()
 
-            if not row:
-                return None
+        if not row:
+            return None
 
-            return self._row_to_document(row)
+        return self._row_to_document(row)
 
     async def get_document_by_path(self, file_path: str) -> Document | None:
         """Get a document by file path."""
@@ -333,6 +353,21 @@ class MetadataStore:
                 )
                 for row in rows
             ]
+
+    async def get_documents_by_ids(self, document_ids: list[str]) -> list[Document]:
+        """Batch fetch documents by IDs."""
+        if not document_ids:
+            return []
+
+        placeholders = ",".join("?" * len(document_ids))
+        db = await self._get_db()
+        cursor = await db.execute(
+            f"SELECT * FROM documents WHERE id IN ({placeholders})",
+            document_ids,
+        )
+        rows = await cursor.fetchall()
+
+        return [self._row_to_document(row) for row in rows]
 
     async def delete_document(self, document_id: str) -> bool:
         """Delete a document and its chunks."""
@@ -406,29 +441,27 @@ class MetadataStore:
 
     async def get_chunks_by_document(self, document_id: str) -> list[Chunk]:
         """Get all chunks for a document."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT * FROM chunks WHERE document_id = ? ORDER BY chunk_index",
-                (document_id,),
-            )
-            rows = await cursor.fetchall()
+        db = await self._get_db()
+        cursor = await db.execute(
+            "SELECT * FROM chunks WHERE document_id = ? ORDER BY chunk_index",
+            (document_id,),
+        )
+        rows = await cursor.fetchall()
 
-            return [self._row_to_chunk(row) for row in rows]
+        return [self._row_to_chunk(row) for row in rows]
 
     async def get_chunk(self, chunk_id: str) -> Chunk | None:
         """Get a chunk by ID."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT * FROM chunks WHERE id = ?", (chunk_id,)
-            )
-            row = await cursor.fetchone()
+        db = await self._get_db()
+        cursor = await db.execute(
+            "SELECT * FROM chunks WHERE id = ?", (chunk_id,)
+        )
+        row = await cursor.fetchone()
 
-            if not row:
-                return None
+        if not row:
+            return None
 
-            return self._row_to_chunk(row)
+        return self._row_to_chunk(row)
 
     async def get_chunks_by_ids(self, chunk_ids: list[str]) -> list[Chunk]:
         """Get multiple chunks by their IDs."""
@@ -436,14 +469,13 @@ class MetadataStore:
             return []
 
         placeholders = ",".join("?" * len(chunk_ids))
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                f"SELECT * FROM chunks WHERE id IN ({placeholders})", chunk_ids
-            )
-            rows = await cursor.fetchall()
+        db = await self._get_db()
+        cursor = await db.execute(
+            f"SELECT * FROM chunks WHERE id IN ({placeholders})", chunk_ids
+        )
+        rows = await cursor.fetchall()
 
-            return [self._row_to_chunk(row) for row in rows]
+        return [self._row_to_chunk(row) for row in rows]
 
     async def delete_chunks_by_document(self, document_id: str) -> int:
         """Delete all chunks for a document."""
@@ -456,34 +488,34 @@ class MetadataStore:
 
     async def filter_documents_by_type(self, doc_type: str) -> list[str]:
         """Get document IDs filtered by detected type."""
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "SELECT id FROM documents WHERE detected_doc_type LIKE ?",
-                (f"%{doc_type}%",),
-            )
-            rows = await cursor.fetchall()
-            return [row[0] for row in rows]
+        db = await self._get_db()
+        cursor = await db.execute(
+            "SELECT id FROM documents WHERE detected_doc_type LIKE ?",
+            (f"%{doc_type}%",),
+        )
+        rows = await cursor.fetchall()
+        return [row[0] for row in rows]
 
     async def filter_documents_by_entity(
         self, entity_key: str, entity_value: str | None = None
     ) -> list[str]:
         """Get document IDs filtered by entity key/value."""
-        async with aiosqlite.connect(self.db_path) as db:
-            if entity_value:
-                cursor = await db.execute(
-                    """
-                    SELECT DISTINCT document_id FROM document_entities
-                    WHERE entity_key = ? AND entity_value LIKE ?
-                    """,
-                    (entity_key, f"%{entity_value}%"),
-                )
-            else:
-                cursor = await db.execute(
-                    "SELECT DISTINCT document_id FROM document_entities WHERE entity_key = ?",
-                    (entity_key,),
-                )
-            rows = await cursor.fetchall()
-            return [row[0] for row in rows]
+        db = await self._get_db()
+        if entity_value:
+            cursor = await db.execute(
+                """
+                SELECT DISTINCT document_id FROM document_entities
+                WHERE entity_key = ? AND entity_value LIKE ?
+                """,
+                (entity_key, f"%{entity_value}%"),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT DISTINCT document_id FROM document_entities WHERE entity_key = ?",
+                (entity_key,),
+            )
+        rows = await cursor.fetchall()
+        return [row[0] for row in rows]
 
     async def get_statistics(self) -> dict[str, Any]:
         """Get index statistics."""
@@ -793,6 +825,7 @@ class MetadataStore:
 
     def _row_to_chunk_metadata(self, row: aiosqlite.Row) -> ChunkMetadata:
         """Convert a database row to a ChunkMetadata model."""
+        row_keys = row.keys()
         return ChunkMetadata(
             chunk_id=row["chunk_id"],
             title=row["title"],
@@ -801,6 +834,7 @@ class MetadataStore:
             entities=json.loads(row["entities"]) if row["entities"] else {},
             category=row["category"],
             contextual_description=row["contextual_description"],
+            temporal_context=row["temporal_context"] if "temporal_context" in row_keys else None,
             enriched_at=datetime.fromisoformat(row["enriched_at"]) if row["enriched_at"] else None,
         )
 
@@ -812,8 +846,8 @@ class MetadataStore:
             await db.execute(
                 """
                 INSERT OR REPLACE INTO chunk_metadata
-                (chunk_id, title, summary, keywords, entities, category, contextual_description, enriched_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (chunk_id, title, summary, keywords, entities, category, contextual_description, temporal_context, enriched_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     metadata.chunk_id,
@@ -823,6 +857,7 @@ class MetadataStore:
                     json.dumps(metadata.entities),
                     metadata.category,
                     metadata.contextual_description,
+                    metadata.temporal_context,
                     metadata.enriched_at.isoformat() if metadata.enriched_at else datetime.utcnow().isoformat(),
                 ),
             )
@@ -837,8 +872,8 @@ class MetadataStore:
             await db.executemany(
                 """
                 INSERT OR REPLACE INTO chunk_metadata
-                (chunk_id, title, summary, keywords, entities, category, contextual_description, enriched_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (chunk_id, title, summary, keywords, entities, category, contextual_description, temporal_context, enriched_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -849,6 +884,7 @@ class MetadataStore:
                         json.dumps(m.entities),
                         m.category,
                         m.contextual_description,
+                        m.temporal_context,
                         m.enriched_at.isoformat() if m.enriched_at else datetime.utcnow().isoformat(),
                     )
                     for m in metadata_list
@@ -867,6 +903,21 @@ class MetadataStore:
             if not row:
                 return None
             return self._row_to_chunk_metadata(row)
+
+    async def get_chunk_metadata_batch(self, chunk_ids: list[str]) -> dict[str, ChunkMetadata]:
+        """Batch fetch chunk metadata by chunk IDs. Returns dict mapping chunk_id -> ChunkMetadata."""
+        if not chunk_ids:
+            return {}
+
+        placeholders = ",".join("?" * len(chunk_ids))
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                f"SELECT * FROM chunk_metadata WHERE chunk_id IN ({placeholders})",
+                chunk_ids,
+            )
+            rows = await cursor.fetchall()
+            return {row["chunk_id"]: self._row_to_chunk_metadata(row) for row in rows}
 
     async def get_chunk_with_metadata(self, chunk_id: str) -> dict | None:
         """Get chunk with its enriched metadata."""

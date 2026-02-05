@@ -34,6 +34,9 @@ class SearchResultItem(BaseModel):
     entities: dict[str, Any] = Field(
         default_factory=dict, description="Relevant entities from this result"
     )
+    temporal_context: str | None = Field(
+        default=None, description="Temporal applicability of this result"
+    )
 
 
 class SearchResponse(BaseModel):

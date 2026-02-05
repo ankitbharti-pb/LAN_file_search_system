@@ -14,7 +14,7 @@ class Chunk(BaseModel):
     contextualized_text: str = Field(
         description="Enriched text with document context (what gets embedded)"
     )
-    content_type: Literal["paragraph", "table", "list", "summary", "schema", "heading", "title", "section_header", "figure"] = Field(
+    content_type: Literal["paragraph", "table", "list", "summary", "schema", "heading", "title", "section_header", "figure", "row_batch"] = Field(
         default="paragraph", description="Type of content in this chunk"
     )
     page: int | None = Field(default=None, description="Page number for PDFs")
@@ -90,6 +90,9 @@ class ChunkMetadata(BaseModel):
     )
     contextual_description: str | None = Field(
         default=None, description="2-3 sentences explaining chunk's role in document"
+    )
+    temporal_context: str | None = Field(
+        default=None, description="Temporal applicability (e.g., 'Effective from 01-Apr-2024')"
     )
     enriched_at: datetime | None = Field(default=None, description="When enrichment was performed")
 

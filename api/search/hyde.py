@@ -89,6 +89,7 @@ class HyDEQueryExpander:
         query: str,
         hypothetical: str,
         alpha: float = 0.5,
+        query_embedding: np.ndarray | None = None,
     ) -> np.ndarray:
         """Combine query and hypothetical embeddings.
 
@@ -96,12 +97,13 @@ class HyDEQueryExpander:
             query: Original user query
             hypothetical: Generated hypothetical document
             alpha: Weight for hypothetical (0=query only, 1=hypothetical only)
+            query_embedding: Pre-computed query embedding (avoids redundant embed call)
 
         Returns:
             Combined embedding vector (L2 normalized)
         """
-        query_emb = embedder.embed(query)
-        hypo_emb = embedder.embed(hypothetical)
+        query_emb = query_embedding if query_embedding is not None else embedder.embed(query, source="hyde_query_fallback")
+        hypo_emb = embedder.embed(hypothetical, source="hyde_hypothetical")
 
         # Weighted combination
         combined = (1 - alpha) * query_emb + alpha * hypo_emb
@@ -142,18 +144,26 @@ class HyDEQueryExpander:
         # Complex queries (10+ words): trust hypothetical more
         return settings.hyde_alpha_max
 
-    async def expand_query(self, query: str) -> tuple[np.ndarray, Optional[str]]:
+    async def expand_query(
+        self,
+        query: str,
+        query_embedding: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, Optional[str]]:
         """Expand a query using HyDE and return the enhanced embedding.
 
         Args:
             query: The user's search query
+            query_embedding: Pre-computed query embedding (avoids redundant embed call)
 
         Returns:
             Tuple of (embedding, hypothetical_text)
             If HyDE fails, returns (query_embedding, None)
         """
+        if query_embedding is None:
+            query_embedding = embedder.embed(query, source="hyde_expand_fallback")
+
         if not settings.enable_hyde:
-            return embedder.embed(query), None
+            return query_embedding, None
 
         hypothetical = await self.generate_hypothetical(query)
 
@@ -165,13 +175,15 @@ class HyDEQueryExpander:
                 alpha = settings.hyde_alpha
 
             # Use weighted combination of query and hypothetical
-            embedding = self.get_hyde_embedding(query, hypothetical, alpha=alpha)
+            embedding = self.get_hyde_embedding(
+                query, hypothetical, alpha=alpha, query_embedding=query_embedding
+            )
             logger.debug(f"Using HyDE-enhanced query embedding (alpha={alpha:.2f})")
             return embedding, hypothetical
         else:
             # Fall back to regular query embedding
             logger.debug("HyDE failed, using regular query embedding")
-            return embedder.embed(query), None
+            return query_embedding, None
 
 
 # Global instance with lazy loading

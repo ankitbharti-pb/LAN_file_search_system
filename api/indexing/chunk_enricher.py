@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from models.chunk import Chunk, ChunkMetadata, ChunkQuestion
-from enrichment.llm_client import LLMClient, get_llm_client
+from enrichment.llm_client import LLMClient, get_enrichment_llm_client
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -22,6 +22,8 @@ Document context:
 - File: {file_name}
 - Type: {doc_type}
 - Section: {heading_path}
+- Document summary: {doc_summary}
+- Key document entities: {doc_entities}
 
 Text chunk:
 \"\"\"
@@ -51,16 +53,18 @@ Return a JSON object with these exact fields:
     "conditions": []         // Important policy conditions
   }},
   "category": "definition|procedure|data|narrative|example|reference",  // Choose one
-  "questions": [         // 5 hypothetical questions this chunk answers
-    // IMPORTANT: Include the document name '{file_name}' in your questions to make them specific
-    // Format: "What is [topic] in [document_name]?" or "How does [process] work according to [document_name]?"
-    // Examples:
-    //   - "What deductible applies in {file_name}?"
-    //   - "What are the coverage limits in {file_name}?"
-    //   - "How do I file a claim according to {file_name}?"
-    // Generate 5 natural questions someone would search to find this content
+  "questions": [
+    // 5 hypothetical questions this chunk answers
+    // IMPORTANT: Make questions SPECIFIC using the document context above.
+    // - Include the insurer/company name, product name, or document name
+    // - Reference specific entities (policy types, process names, dates) from the chunk
+    // - Do NOT generate generic questions that could apply to any document
+    // Format: "What is [specific topic] for [specific entity] in [document]?"
+    // BAD:  "What is the mobile number change process?"
+    // GOOD: "What is the mobile number change process in Care Health Insurance SOP?"
   ],
-  "contextual_description": "2-3 sentences explaining what role this chunk plays in the document and what someone searching for this content might be looking for"
+  "contextual_description": "2-3 sentences explaining what role this chunk plays in the document and what someone searching for this content might be looking for",
+  "temporal_context": "If this chunk mentions specific dates, date ranges, effective dates, or before/after conditions — describe them in 1 sentence. Example: 'This process applies from 01-Apr-2024 onwards, replacing the earlier process.' Return null if no temporal information is present."
 }}
 
 Important:
@@ -102,7 +106,7 @@ class ChunkEnricher:
     def llm_client(self) -> LLMClient:
         """Lazy load the LLM client."""
         if self._llm_client is None:
-            self._llm_client = get_llm_client()
+            self._llm_client = get_enrichment_llm_client()
         return self._llm_client
 
     async def enrich_chunk(
@@ -128,6 +132,8 @@ class ChunkEnricher:
             doc_type=doc_context.get("detected_doc_type", "unknown"),
             heading_path=chunk.heading_path or "N/A",
             chunk_text=chunk.text[:3000],  # Limit text length
+            doc_summary=doc_context.get("summary", "N/A"),
+            doc_entities=self._format_doc_entities(doc_context.get("entities", {})),
         )
 
         try:
@@ -210,6 +216,7 @@ class ChunkEnricher:
             entities=self._normalize_entities(result.get("entities", {})),
             category=self._validate_category(result.get("category")),
             contextual_description=result.get("contextual_description"),
+            temporal_context=result.get("temporal_context"),
             enriched_at=datetime.utcnow(),
         )
 
@@ -255,6 +262,17 @@ class ChunkEnricher:
         if category and category.lower() in valid_categories:
             return category.lower()
         return None
+
+    def _format_doc_entities(self, entities: dict) -> str:
+        """Format document-level entities for inclusion in the enrichment prompt."""
+        if not entities:
+            return "N/A"
+        parts = []
+        for k, v in list(entities.items())[:8]:
+            if isinstance(v, list):
+                v = ", ".join(str(x) for x in v[:3])
+            parts.append(f"{k}: {v}")
+        return "; ".join(parts) if parts else "N/A"
 
     def _empty_metadata(self, chunk_id: str) -> ChunkMetadata:
         """Create empty metadata for failed enrichment."""

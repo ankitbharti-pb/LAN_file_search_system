@@ -84,18 +84,17 @@ Return a JSON object:
 Respond with ONLY the JSON object."""
 
 
-RESPONSE_SYNTHESIS_PROMPT = """Based on the following search results, provide a comprehensive answer to the user's question.
+RESPONSE_SYNTHESIS_PROMPT = """Answer the user's question using ONLY the search results below. Do not invent information.
 
-USER QUESTION: {query}
+QUESTION: {query}
 
 SEARCH RESULTS:
 {results}
 
-Instructions:
-1. Synthesize information from the relevant results
-2. Cite sources by document name when appropriate
-3. Be concise but complete
-4. If the results don't contain enough information to answer, say so
-5. Don't make up information not present in the results
+Rules:
+1. Answer ONLY what was asked. Ignore tangentially related results (e.g. question about X ≠ information about Y). Prefer higher-scoring results (score closer to 1.0).
+2. If no result directly answers the question, reply: "No exact match was found for this query." and briefly note what related information is available.
+3. Citations: Never reference result numbers. Cite the clause, section, or heading from WITHIN the content (e.g. "Clause 4.2", "Schedule B"). If none exists, cite Document Name + Section/Heading from metadata. Every claim needs an inline citation: *(Clause 4.2, Policy Wording)*.
+4. Note temporal context — if a process changed on a date, state which version applies and when.
 
-Provide a clear, helpful answer:"""
+Format (Markdown): Start with a direct 1-2 sentence answer. Use ### headings only for distinct sub-topics, **bold** for document names and key terms, and bullet lists for steps or multiple items. Be concise."""

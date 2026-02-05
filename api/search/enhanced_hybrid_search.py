@@ -2,11 +2,16 @@
 
 Supports HyDE (Hypothetical Document Embeddings) for improved query-document matching.
 Includes optional cross-encoder re-ranking and MMR diversity.
+Optimized with parallel HyDE+BM25 execution and batch DB queries.
 """
 
+import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
+
+import numpy as np
 
 from config.settings import settings
 from indexing.embedder import embedder
@@ -94,6 +99,7 @@ class EnhancedHybridSearch:
         debug: bool = False,
         document_id: str | None = None,
         query_type: str | None = None,
+        query_embedding: np.ndarray | None = None,
     ) -> EnhancedSearchResult:
         """
         Execute enhanced hybrid search with multi-vector retrieval.
@@ -105,17 +111,24 @@ class EnhancedHybridSearch:
             debug: If True, include debug information
             document_id: If provided, search only within this document
             query_type: Query type for adaptive weights ('factual', 'exploratory', 'comparative', 'aggregation')
+            query_embedding: Pre-computed query embedding (avoids redundant embed call)
 
         Returns:
             EnhancedSearchResult with results and optional debug info
         """
+        search_start = time.time()
         debug_info = DebugInfo(query=query) if debug else None
 
         # Select weight profile based on query type (if provided and not overridden in constructor)
         if query_type and self.weights == settings.multi_vector_weights:
             self.weights = settings.get_weight_profile(query_type)
 
+        # Ensure we have query embedding (Phase 1: single embed)
+        if query_embedding is None:
+            query_embedding = embedder.embed(query, source="query_fallback")
+
         # Apply filters to get candidate chunk IDs
+        t0 = time.time()
         filter_chunk_ids = None
         if document_id:
             # Search within specific document
@@ -125,44 +138,66 @@ class EnhancedHybridSearch:
             filter_doc_ids = await self._apply_filters(filters)
             if filter_doc_ids is not None:
                 if len(filter_doc_ids) == 0:
-                    return EnhancedSearchResult(results=[], debug_info=debug_info)
-                chunks = []
-                for doc_id in filter_doc_ids:
-                    doc_chunks = await metadata_store.get_chunks_by_document(doc_id)
-                    chunks.extend(doc_chunks)
-                filter_chunk_ids = [c.id for c in chunks]
+                    logger.warning("Doc-type filter matched 0 documents, proceeding without filter")
+                else:
+                    chunks = []
+                    for doc_id in filter_doc_ids:
+                        doc_chunks = await metadata_store.get_chunks_by_document(doc_id)
+                        chunks.extend(doc_chunks)
+                    filter_chunk_ids = [c.id for c in chunks]
+        logger.info(f"[Latency] filters: {(time.time() - t0) * 1000:.0f}ms")
 
-        # Embed query with optional HyDE expansion
-        hypothetical_text = None
-        if settings.enable_hyde:
-            query_embedding, hypothetical_text = await hyde_expander.expand_query(query)
-            if debug_info:
-                debug_info.hyde_enabled = True
-                debug_info.hyde_hypothetical = hypothetical_text
-        else:
-            query_embedding = embedder.embed(query)
-
-        # Search all vector indices
+        # Phase 2: Run HyDE and BM25 in parallel
+        # BM25 doesn't need HyDE-enhanced embedding, so start it concurrently
         search_k = k * 3
+
+        async def _run_bm25():
+            if debug:
+                return keyword_index.search_with_keywords(query, k=search_k), True
+            return keyword_index.search(query, k=search_k), False
+
+        async def _run_hyde():
+            if settings.enable_hyde:
+                return await hyde_expander.expand_query(query, query_embedding=query_embedding)
+            return query_embedding, None
+
+        # Launch BM25 and HyDE concurrently
+        t0 = time.time()
+        bm25_task = asyncio.create_task(_run_bm25())
+        hyde_task = asyncio.create_task(_run_hyde())
+
+        # Await HyDE (may take 1-3s for LLM call, BM25 runs during this wait)
+        final_embedding, hypothetical_text = await hyde_task
+        if debug_info:
+            debug_info.hyde_enabled = settings.enable_hyde
+            debug_info.hyde_hypothetical = hypothetical_text
+
+        # Vector search with final embedding (HyDE-enhanced or raw)
+        # Phase 7: search_all runs 3 FAISS indices in parallel internally
+        t_faiss = time.time()
         vector_results = multi_vector_index.search_all(
-            query_embedding,
+            final_embedding,
             k=search_k,
             filter_ids=filter_chunk_ids,
         )
+        logger.info(f"[Latency] faiss_search: {(time.time() - t_faiss) * 1000:.0f}ms")
 
         main_results = vector_results.get("main", [])
         summary_results = vector_results.get("summary", [])
         question_results = vector_results.get("question", [])
 
-        # Search BM25 keyword index
+        # Get BM25 results (should be done by now since it ran during HyDE wait)
+        t_bm25 = time.time()
+        bm25_raw, was_debug = await bm25_task
+        logger.info(f"[Latency] bm25_await: {(time.time() - t_bm25) * 1000:.0f}ms")
+        logger.info(f"[Latency] hyde_bm25_parallel: {(time.time() - t0) * 1000:.0f}ms")
+
         bm25_matched_keywords: dict[str, list[str]] = {}
-        if debug:
-            # Use search_with_keywords to get matched keywords for debug
-            bm25_results_with_kw = keyword_index.search_with_keywords(query, k=search_k)
-            bm25_results = [(cid, score) for cid, score, _ in bm25_results_with_kw]
-            bm25_matched_keywords = {cid: kw for cid, _, kw in bm25_results_with_kw}
+        if was_debug:
+            bm25_results = [(cid, score) for cid, score, _ in bm25_raw]
+            bm25_matched_keywords = {cid: kw for cid, _, kw in bm25_raw}
         else:
-            bm25_results = keyword_index.search(query, k=search_k)
+            bm25_results = bm25_raw
 
         # Apply chunk filter to BM25 results if needed
         if filter_chunk_ids:
@@ -170,7 +205,6 @@ class EnhancedHybridSearch:
             bm25_results = [
                 (cid, score) for cid, score in bm25_results if cid in filter_set
             ]
-            # Also filter keywords mapping
             bm25_matched_keywords = {
                 cid: kw for cid, kw in bm25_matched_keywords.items() if cid in filter_set
             }
@@ -187,48 +221,101 @@ class EnhancedHybridSearch:
             }
 
         # RRF fusion
+        t0 = time.time()
         fused, rrf_details = self._multi_source_rrf(
             main_results=main_results,
             summary_results=summary_results,
             question_results=question_results,
             bm25_results=bm25_results,
         )
+        logger.info(f"[Latency] rrf_fusion: {(time.time() - t0) * 1000:.0f}ms")
 
         if debug_info:
             debug_info.rrf_scores = rrf_details
 
         # Apply optional post-processing: re-ranking and/or MMR
+        t0 = time.time()
         top_results = await self._apply_post_processing(
             query=query,
             query_embedding=query_embedding,
             fused_results=fused,
             k=k,
         )
+        logger.info(f"[Latency] post_processing: {(time.time() - t0) * 1000:.0f}ms")
 
         if debug_info:
             debug_info.final_ranking = top_results[:k]
 
+        # Phase 3: Batch DB queries instead of N+1 individual calls
+        t0 = time.time()
+        top_chunk_ids = [cid for cid, _ in top_results]
+        top_scores = {cid: score for cid, score in top_results}
+
+        # Batch fetch all chunks in ONE query
+        chunks = await metadata_store.get_chunks_by_ids(top_chunk_ids)
+        chunks_map = {c.id: c for c in chunks}
+
+        # Batch fetch all documents in ONE query
+        doc_ids = list(set(c.document_id for c in chunks))
+        documents = await metadata_store.get_documents_by_ids(doc_ids)
+        docs_map = {d.id: d for d in documents}
+
+        # Batch fetch chunk metadata for temporal_context
+        chunk_meta_map = await metadata_store.get_chunk_metadata_batch(top_chunk_ids)
+        logger.info(f"[Latency] db_batch_fetch: {(time.time() - t0) * 1000:.0f}ms")
+
+        # Build results from in-memory maps (no DB calls)
+        t0 = time.time()
         results = []
         source_attribution: dict[str, list[SourceType]] = {}
 
-        for chunk_id, score in top_results:
-            result_item = await self._build_result_item(chunk_id, score, query)
-            if result_item:
-                results.append(result_item)
+        for chunk_id in top_chunk_ids:
+            chunk = chunks_map.get(chunk_id)
+            if not chunk:
+                continue
+            document = docs_map.get(chunk.document_id)
+            if not document:
+                continue
 
-                # Track source attribution
-                sources = self._get_sources(
-                    chunk_id,
-                    main_results,
-                    summary_results,
-                    question_results,
-                    bm25_results,
-                )
-                source_attribution[chunk_id] = sources
+            score = top_scores[chunk_id]
+            highlights = self._create_highlights(chunk.text, query)
+
+            # Get temporal_context from chunk metadata if available
+            meta = chunk_meta_map.get(chunk.id)
+            temporal_ctx = meta.temporal_context if meta else None
+
+            result_item = SearchResultItem(
+                document_id=document.id,
+                file_name=document.file_name,
+                file_type=document.file_type,
+                detected_doc_type=document.detected_doc_type,
+                chunk_text=chunk.text[:500],
+                chunk_id=chunk.id,
+                score=score,
+                page=chunk.page,
+                sheet_name=chunk.sheet_name,
+                heading_path=chunk.heading_path,
+                highlights=highlights,
+                entities=chunk.entities,
+                temporal_context=temporal_ctx,
+            )
+            results.append(result_item)
+
+            # Track source attribution
+            sources = self._get_sources(
+                chunk_id,
+                main_results,
+                summary_results,
+                question_results,
+                bm25_results,
+            )
+            source_attribution[chunk_id] = sources
+        logger.info(f"[Latency] result_building: {(time.time() - t0) * 1000:.0f}ms")
 
         if debug_info:
             debug_info.source_attribution = source_attribution
 
+        logger.info(f"[Latency] enhanced_search_total: {(time.time() - search_start) * 1000:.0f}ms")
         return EnhancedSearchResult(results=results, debug_info=debug_info)
 
     async def _apply_post_processing(
@@ -255,13 +342,15 @@ class EnhancedHybridSearch:
 
         # Fetch chunk texts for re-ranking or MMR (they need the text)
         if settings.reranker_enabled or settings.mmr_enabled:
-            results_with_text = []
-            for chunk_id, score in candidates:
-                chunk = await metadata_store.get_chunk(chunk_id)
-                if chunk:
-                    results_with_text.append((chunk_id, score, chunk.text))
-                else:
-                    results_with_text.append((chunk_id, score, ""))
+            # Batch fetch chunks instead of N+1 queries
+            candidate_ids = [cid for cid, _ in candidates]
+            chunks = await metadata_store.get_chunks_by_ids(candidate_ids)
+            text_map = {c.id: c.text for c in chunks}
+
+            results_with_text = [
+                (chunk_id, score, text_map.get(chunk_id, ""))
+                for chunk_id, score in candidates
+            ]
 
             # Apply cross-encoder re-ranking
             if settings.reranker_enabled:
@@ -396,41 +485,6 @@ class EnhancedHybridSearch:
                     candidate_ids &= set(entity_ids)
 
         return list(candidate_ids) if candidate_ids is not None else None
-
-    async def _build_result_item(
-        self,
-        chunk_id: str,
-        score: float,
-        query: str,
-    ) -> SearchResultItem | None:
-        """Build a search result item from a chunk."""
-        # Get chunk from metadata store
-        chunk = await metadata_store.get_chunk(chunk_id)
-        if not chunk:
-            return None
-
-        # Get document
-        document = await metadata_store.get_document(chunk.document_id)
-        if not document:
-            return None
-
-        # Create highlights
-        highlights = self._create_highlights(chunk.text, query)
-
-        return SearchResultItem(
-            document_id=document.id,
-            file_name=document.file_name,
-            file_type=document.file_type,
-            detected_doc_type=document.detected_doc_type,
-            chunk_text=chunk.text[:500],  # Truncate for response
-            chunk_id=chunk.id,
-            score=score,
-            page=chunk.page,
-            sheet_name=chunk.sheet_name,
-            heading_path=chunk.heading_path,
-            highlights=highlights,
-            entities=chunk.entities,
-        )
 
     def _create_highlights(self, text: str, query: str) -> list[str]:
         """Create highlighted snippets showing query matches."""

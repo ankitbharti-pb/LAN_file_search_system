@@ -45,6 +45,9 @@ class ParseResult:
     # Statistics for tabular
     numeric_stats: dict[str, dict[str, float]] | None = None
 
+    # Full DataFrame for row-batch chunking (CSV/Excel)
+    dataframe: Any | None = None
+
 
 class BaseParser(ABC):
     """Abstract base class for file parsers."""

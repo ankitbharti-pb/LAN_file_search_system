@@ -493,6 +493,14 @@ async def delete_folder(path: str, force: bool = Query(default=False)) -> Delete
                     doc_id = generate_document_id(item)
                     doc = await metadata_store.get_document(doc_id)
                     if doc:
+                        # Get chunks and clean indices BEFORE DB deletion
+                        chunks = await metadata_store.get_chunks_by_document(doc_id)
+                        chunk_ids = [c.id for c in chunks]
+                        if chunk_ids:
+                            keyword_index.remove(chunk_ids)
+                            for chunk_id in chunk_ids:
+                                multi_vector_index.remove_chunk(chunk_id)
+
                         await metadata_store.delete_pages(doc_id)
                         await metadata_store.delete_chunks_by_document(doc_id)
                         await metadata_store.delete_document(doc_id)
@@ -500,6 +508,11 @@ async def delete_folder(path: str, force: bool = Query(default=False)) -> Delete
                         processing_dir = settings.data_folder / "processing" / doc_id
                         if processing_dir.exists():
                             shutil.rmtree(processing_dir)
+
+            # Save indices after all files cleaned up
+            keyword_index.save()
+            multi_vector_index.save()
+
             shutil.rmtree(folder_path)
         else:
             folder_path.rmdir()

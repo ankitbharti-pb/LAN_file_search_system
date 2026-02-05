@@ -68,6 +68,10 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down LAN File Search System")
 
+    # Close persistent database connection
+    await metadata_store.close()
+    logger.info("Database connection closed")
+
     # Save indexes
     keyword_index.save()
     multi_vector_index.save()

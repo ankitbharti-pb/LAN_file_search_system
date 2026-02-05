@@ -6,6 +6,7 @@ bi-encoders which encode them separately.
 """
 
 import logging
+import time
 from typing import List, Tuple
 
 from config.settings import settings
@@ -86,7 +87,9 @@ class CrossEncoderReranker:
 
         try:
             # Get cross-encoder scores
+            t0 = time.time()
             ce_scores = self.model.predict(pairs)
+            logger.info(f"[Latency] reranker_predict: {(time.time() - t0) * 1000:.0f}ms ({len(pairs)} pairs)")
 
             # Normalize cross-encoder scores to 0-1 range
             min_score = min(ce_scores)

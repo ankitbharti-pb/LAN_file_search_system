@@ -39,11 +39,12 @@ class Embedder:
         """Get embedding dimension."""
         return self.model.get_sentence_embedding_dimension()
 
-    def embed(self, text: str) -> np.ndarray:
+    def embed(self, text: str, source: str = "") -> np.ndarray:
         """Embed a single text string."""
         if not text.strip():
             return np.zeros(self.dimension)
 
+        logger.info(f"[Embed] source={source}, text='{text[:80]}...' ({len(text)} chars)")
         embedding = self.model.encode(
             text,
             convert_to_numpy=True,

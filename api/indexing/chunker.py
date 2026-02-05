@@ -4,6 +4,8 @@ import hashlib
 import logging
 from typing import Any
 
+import pandas as pd
+
 from models.chunk import Chunk
 from parsers.base import ParseResult, HeadingInfo
 from enrichment.entity_extractor import EnrichmentResult
@@ -258,10 +260,128 @@ class Chunker:
                 )
                 chunk_index += 1
 
+        # Row-batch chunks for full CSV/Excel data
+        if parse_result.dataframe is not None:
+            row_batch_chunks = self._create_row_batch_chunks(
+                df=parse_result.dataframe,
+                column_headers=parse_result.column_headers or [],
+                document_id=document_id,
+                file_name=file_name,
+                enrichment=enrichment,
+                start_chunk_index=chunk_index,
+            )
+            chunks.extend(row_batch_chunks)
+            chunk_index += len(row_batch_chunks)
+
         # Establish cross-chunk links
         self._establish_chunk_links(chunks)
 
         return chunks
+
+    def _create_row_batch_chunks(
+        self,
+        df: pd.DataFrame,
+        column_headers: list[str],
+        document_id: str,
+        file_name: str,
+        enrichment: EnrichmentResult,
+        start_chunk_index: int,
+    ) -> list[Chunk]:
+        """Create row-batch chunks from a DataFrame.
+
+        Groups rows into batches of csv_rows_per_chunk, each self-contained
+        with column headers for searchability.
+        """
+        rows_per_chunk = settings.csv_rows_per_chunk
+        max_rows = settings.csv_max_rows_to_index
+        total_rows = len(df)
+
+        if max_rows > 0 and total_rows > max_rows:
+            logger.warning(
+                f"CSV has {total_rows} rows, capping at {max_rows} "
+                f"(csv_max_rows_to_index={max_rows})"
+            )
+            df = df.head(max_rows)
+            total_rows = max_rows
+
+        header_line = f"Columns: {', '.join(column_headers)}"
+        chunks = []
+        chunk_index = start_chunk_index
+
+        for batch_start in range(0, total_rows, rows_per_chunk):
+            batch_end = min(batch_start + rows_per_chunk, total_rows)
+            batch_df = df.iloc[batch_start:batch_end]
+
+            # Format each row as "Row N: col1=val1, col2=val2, ..."
+            row_lines = []
+            for i, (_, row) in enumerate(batch_df.iterrows()):
+                row_num = batch_start + i + 1  # 1-based
+                parts = []
+                for col in column_headers:
+                    val = row.get(col, "")
+                    if pd.notna(val):
+                        parts.append(f"{col}={val}")
+                row_lines.append(f"Row {row_num}: {', '.join(parts)}")
+
+            batch_text = f"{header_line}\n" + "\n".join(row_lines)
+
+            # If batch is too large, split on row boundaries
+            if len(batch_text) > self.chunk_size * 2:
+                sub_texts = self._split_row_batch_text(
+                    header_line, row_lines
+                )
+            else:
+                sub_texts = [batch_text]
+
+            for text in sub_texts:
+                context = self._build_context(
+                    file_name=file_name,
+                    doc_type=enrichment.document_type,
+                    heading_path="Row Data",
+                    entities=enrichment.entities,
+                )
+                contextualized = f"{context}\n\n{text}"
+
+                chunk_id = self._generate_chunk_id(document_id, chunk_index)
+                chunks.append(
+                    Chunk(
+                        id=chunk_id,
+                        document_id=document_id,
+                        text=text,
+                        contextualized_text=contextualized,
+                        content_type="row_batch",
+                        chunk_index=chunk_index,
+                    )
+                )
+                chunk_index += 1
+
+        logger.info(
+            f"Created {len(chunks)} row batch chunks from {total_rows} rows "
+            f"for {file_name}"
+        )
+        return chunks
+
+    def _split_row_batch_text(
+        self, header_line: str, row_lines: list[str]
+    ) -> list[str]:
+        """Split an oversized row batch into smaller texts on row boundaries."""
+        texts = []
+        current_lines = [header_line]
+        current_len = len(header_line)
+
+        for line in row_lines:
+            line_len = len(line) + 1  # +1 for newline
+            if current_len + line_len > self.chunk_size * 2 and len(current_lines) > 1:
+                texts.append("\n".join(current_lines))
+                current_lines = [header_line]
+                current_len = len(header_line)
+            current_lines.append(line)
+            current_len += line_len
+
+        if len(current_lines) > 1:  # More than just the header
+            texts.append("\n".join(current_lines))
+
+        return texts
 
     def _split_text(self, text: str) -> list[str]:
         """Split text into chunks with overlap, respecting sentence boundaries."""

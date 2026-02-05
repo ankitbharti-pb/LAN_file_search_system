@@ -1,6 +1,7 @@
 """Multi-vector FAISS index for advanced RAG retrieval."""
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
 
@@ -33,6 +34,9 @@ class MultiVectorIndex:
 
         # Question ID to chunk ID mapping (for question vectors)
         self._question_to_chunk: dict[str, str] = {}
+
+        # Thread pool for parallel FAISS searches
+        self._executor = ThreadPoolExecutor(max_workers=3)
 
     def add_chunk(
         self,
@@ -111,7 +115,7 @@ class MultiVectorIndex:
         filter_ids: list[str] | None = None,
     ) -> dict[VectorType, list[tuple[str, float]]]:
         """
-        Search across specified indices.
+        Search across specified indices in parallel using thread pool.
 
         Args:
             query_embedding: Query embedding
@@ -124,31 +128,41 @@ class MultiVectorIndex:
         """
         vector_types = vector_types or ["main", "summary", "question"]
         results: dict[VectorType, list[tuple[str, float]]] = {}
+        futures = {}
 
+        # Submit all searches to thread pool in parallel
         if "main" in vector_types:
-            main_results = self.main_index.search(query_embedding, k, filter_ids)
-            results["main"] = main_results
+            futures["main"] = self._executor.submit(
+                self.main_index.search, query_embedding, k, filter_ids
+            )
 
         if "summary" in vector_types:
-            # For summary, filter by chunk ID (without _summary suffix)
             summary_filter = None
             if filter_ids:
                 summary_filter = [f"{cid}_summary" for cid in filter_ids]
-
-            summary_results_raw = self.summary_index.search(query_embedding, k, summary_filter)
-
-            # Convert summary IDs back to chunk IDs
-            summary_results = []
-            for summary_id, score in summary_results_raw:
-                chunk_id = summary_id.replace("_summary", "")
-                summary_results.append((chunk_id, score))
-
-            results["summary"] = summary_results
+            futures["summary"] = self._executor.submit(
+                self.summary_index.search, query_embedding, k, summary_filter
+            )
 
         if "question" in vector_types:
-            # Search question index and map back to chunks
-            question_results_raw = self.question_index.search(query_embedding, k * 2)
+            futures["question"] = self._executor.submit(
+                self.question_index.search, query_embedding, k * 2, None
+            )
 
+        # Collect results
+        if "main" in futures:
+            results["main"] = futures["main"].result()
+
+        if "summary" in futures:
+            summary_results_raw = futures["summary"].result()
+            # Convert summary IDs back to chunk IDs
+            results["summary"] = [
+                (summary_id.replace("_summary", ""), score)
+                for summary_id, score in summary_results_raw
+            ]
+
+        if "question" in futures:
+            question_results_raw = futures["question"].result()
             # Map question IDs to chunk IDs and deduplicate
             seen_chunks: set[str] = set()
             question_results = []
@@ -159,7 +173,6 @@ class MultiVectorIndex:
                     if filter_ids is None or chunk_id in filter_ids:
                         question_results.append((chunk_id, score))
                         seen_chunks.add(chunk_id)
-
                         if len(question_results) >= k:
                             break
 

@@ -73,6 +73,7 @@ class CSVParser(BaseParser):
                 sample_rows=sample_rows,
                 row_count=row_count,
                 numeric_stats=numeric_stats,
+                dataframe=df,
             )
 
         except Exception as e:

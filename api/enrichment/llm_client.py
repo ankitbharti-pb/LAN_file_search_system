@@ -11,6 +11,45 @@ from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+# Pricing per 1M tokens: (input, output)
+OPENAI_PRICING: dict[str, tuple[float, float]] = {
+    # GPT-5 family
+    "gpt-5.2": (1.75, 14.00),
+    "gpt-5.1": (1.25, 10.00),
+    "gpt-5": (1.25, 10.00),
+    "gpt-5-mini": (0.25, 2.00),
+    "gpt-5-nano": (0.05, 0.40),
+    # GPT-4.1 family
+    "gpt-4.1": (2.00, 8.00),
+    "gpt-4.1-mini": (0.40, 1.60),
+    "gpt-4.1-nano": (0.10, 0.40),
+    # GPT-4o family
+    "gpt-4o": (2.50, 10.00),
+    "gpt-4o-mini": (0.15, 0.60),
+    # o-series
+    "o3": (2.00, 8.00),
+    "o4-mini": (1.10, 4.40),
+}
+
+GEMINI_PRICING: dict[str, tuple[float, float]] = {
+    "gemini-1.5-flash": (0.075, 0.30),
+    "gemini-1.5-pro": (1.25, 5.00),
+    "gemini-2.0-flash": (0.10, 0.40),
+    "gemini-2.5-flash": (0.15, 0.60),
+    "gemini-2.5-pro": (1.25, 10.00),
+}
+
+
+def _get_pricing(model: str, pricing_table: dict[str, tuple[float, float]]) -> tuple[float, float]:
+    """Look up pricing for a model, falling back to prefix matching."""
+    if model in pricing_table:
+        return pricing_table[model]
+    # Prefix match for versioned model names (e.g. "gpt-4.1-mini-2025-04-14")
+    for key in sorted(pricing_table, key=len, reverse=True):
+        if model.startswith(key):
+            return pricing_table[key]
+    return (0.0, 0.0)
+
 
 class LLMClient(ABC):
     """Abstract base class for LLM clients."""
@@ -99,9 +138,24 @@ class OpenAIClient(LLMClient):
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=max_tokens,
+                max_completion_tokens=max_tokens,
                 temperature=temperature,
             )
+
+            # Log token usage for cost estimation
+            if response.usage:
+                u = response.usage
+                price_in, price_out = _get_pricing(self.model, OPENAI_PRICING)
+                cost_input = (u.prompt_tokens / 1_000_000) * price_in
+                cost_output = (u.completion_tokens / 1_000_000) * price_out
+                cost_total = cost_input + cost_output
+                logger.info(
+                    f"[LLM Usage] model={self.model} "
+                    f"prompt_tokens={u.prompt_tokens} "
+                    f"completion_tokens={u.completion_tokens} "
+                    f"total_tokens={u.total_tokens} "
+                    f"cost=${cost_total:.6f}"
+                )
 
             return response.choices[0].message.content or ""
 
@@ -160,6 +214,24 @@ class GeminiClient(LLMClient):
                 },
             )
 
+            # Log token usage for cost estimation
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                um = response.usage_metadata
+                prompt_tokens = getattr(um, "prompt_token_count", 0) or 0
+                completion_tokens = getattr(um, "candidates_token_count", 0) or 0
+                total_tokens = getattr(um, "total_token_count", 0) or 0
+                price_in, price_out = _get_pricing(self.model, GEMINI_PRICING)
+                cost_input = (prompt_tokens / 1_000_000) * price_in
+                cost_output = (completion_tokens / 1_000_000) * price_out
+                cost_total = cost_input + cost_output
+                logger.info(
+                    f"[LLM Usage] model={self.model} "
+                    f"prompt_tokens={prompt_tokens} "
+                    f"completion_tokens={completion_tokens} "
+                    f"total_tokens={total_tokens} "
+                    f"cost=${cost_total:.6f}"
+                )
+
             return response.text or ""
 
         except Exception as e:
@@ -173,6 +245,28 @@ def get_llm_client() -> LLMClient:
         return OpenAIClient()
     elif settings.llm_provider == "gemini":
         return GeminiClient()
+    else:
+        raise ValueError(f"Unknown LLM provider: {settings.llm_provider}")
+
+
+def get_enrichment_llm_client() -> LLMClient:
+    """Get LLM client configured for chunk enrichment."""
+    model = settings.enrichment_model or None
+    if settings.llm_provider == "openai":
+        return OpenAIClient(model=model)
+    elif settings.llm_provider == "gemini":
+        return GeminiClient(model=model)
+    else:
+        raise ValueError(f"Unknown LLM provider: {settings.llm_provider}")
+
+
+def get_synthesis_llm_client() -> LLMClient:
+    """Get LLM client configured for response synthesis."""
+    model = settings.synthesis_model or None
+    if settings.llm_provider == "openai":
+        return OpenAIClient(model=model)
+    elif settings.llm_provider == "gemini":
+        return GeminiClient(model=model)
     else:
         raise ValueError(f"Unknown LLM provider: {settings.llm_provider}")
 

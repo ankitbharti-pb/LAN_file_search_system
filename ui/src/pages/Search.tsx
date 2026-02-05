@@ -1,10 +1,24 @@
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { Bug, Zap, FileText, MessageCircle, Hash, ChevronDown, ChevronUp, ExternalLink } from 'lucide-react'
+import { Bug, Zap, FileText, MessageCircle, Hash, ChevronDown, ChevronUp, ExternalLink, Sparkles } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
 import { api, SearchResponse, SourceInfo } from '../api/client'
 import SearchBar from '../components/SearchBar'
 import SearchResults from '../components/SearchResults'
 import { SourcePreviewModal } from '../components/SourcePreviewModal'
+
+function getDocTypeColor(docType: string): string {
+  const t = docType.toLowerCase()
+  if (t.includes('policy')) return 'bg-purple-100 text-purple-700'
+  if (t.includes('spreadsheet') || t.includes('excel') || t.includes('premium')) return 'bg-green-100 text-green-700'
+  if (t.includes('report') || t.includes('analysis')) return 'bg-blue-100 text-blue-700'
+  if (t.includes('form') || t.includes('application')) return 'bg-yellow-100 text-yellow-700'
+  if (t.includes('certificate') || t.includes('compliance')) return 'bg-teal-100 text-teal-700'
+  if (t.includes('claim')) return 'bg-red-100 text-red-700'
+  if (t.includes('guide') || t.includes('training')) return 'bg-indigo-100 text-indigo-700'
+  if (t.includes('notice') || t.includes('announcement')) return 'bg-orange-100 text-orange-700'
+  return 'bg-gray-100 text-gray-600'
+}
 
 export default function Search() {
   const [response, setResponse] = useState<SearchResponse | null>(null)
@@ -21,6 +35,9 @@ export default function Search() {
       searchMutation.mutate(query)
     }
   }
+
+  const hasSources = response?.sources && response.sources.length > 0
+  const hasAnswer = !!response?.answer
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-8">
@@ -116,57 +133,98 @@ export default function Search() {
       {response && (
         <div>
           {/* Stats Bar */}
-          <div className="flex items-center justify-between mb-6 text-sm text-gray-500">
+          <div className="flex items-center mb-5 text-sm text-gray-400">
             <span>
               Found {response.total_results} results in {response.latency_ms.toFixed(0)}ms
             </span>
-            <div className="flex items-center gap-4">
-              {response.cache_hit && (
-                <span className="badge-green">Cache Hit</span>
-              )}
-              <span className="badge-gray capitalize">{response.response_tier}</span>
-            </div>
           </div>
 
-          {/* AI Answer (if synthesis mode) */}
-          {response.answer && (
-            <div className="card mb-6 bg-primary-50 border-primary-200">
-              <div className="flex items-center gap-2 mb-3">
-                <svg className="h-5 w-5 text-primary-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                </svg>
-                <h3 className="font-semibold text-primary-700">AI Answer</h3>
+          {/* Unified AI Answer + Sources Card */}
+          {hasAnswer ? (
+            <div className="ai-answer-card mb-8">
+              {/* Header zone */}
+              <div className="px-6 pt-5 pb-3 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center">
+                    <Sparkles className="w-4 h-4 text-white" />
+                  </div>
+                  <h3 className="font-semibold text-gray-900">AI Answer</h3>
+                </div>
+                <div className="flex items-center gap-2">
+                  {response.cache_hit && (
+                    <span className="badge-green">Cache Hit</span>
+                  )}
+                  <span className="badge-gray capitalize">{response.response_tier}</span>
+                </div>
               </div>
-              <p className="text-gray-700 whitespace-pre-wrap">{response.answer}</p>
-            </div>
-          )}
 
-          {/* Sources - Always show when available */}
-          {response.sources && response.sources.length > 0 && (
-            <div className="card mb-6 bg-gray-50 border-gray-200">
-              <h4 className="text-sm font-semibold text-gray-800 mb-3 flex items-center gap-2">
-                <FileText className="w-4 h-4" />
-                Sources ({response.sources.length} document{response.sources.length > 1 ? 's' : ''} used)
-              </h4>
-              <div className="flex flex-wrap gap-2">
-                {response.sources.map((source) => (
-                  <button
-                    key={source.document_id}
-                    onClick={() => setPreviewSource(source)}
-                    className="inline-flex items-center gap-2 px-3 py-1.5 bg-white rounded-lg border border-gray-200 text-sm hover:border-blue-400 hover:shadow-sm transition-all cursor-pointer"
-                  >
-                    <span className="font-medium text-gray-800">{source.file_name}</span>
-                    <span className="text-gray-500 text-xs">
-                      ({source.chunks_used} chunk{source.chunks_used > 1 ? 's' : ''})
-                    </span>
-                    <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded text-xs">
-                      {source.detected_doc_type}
-                    </span>
-                    <ExternalLink className="w-3 h-3 text-gray-400" />
-                  </button>
-                ))}
+              {/* Markdown content zone */}
+              <div className="px-6 pb-5">
+                <div className="prose prose-sm max-w-none text-gray-700 prose-headings:text-gray-900 prose-headings:text-base prose-headings:font-semibold prose-headings:mt-4 prose-headings:mb-2 prose-p:my-2 prose-p:leading-relaxed prose-li:my-0.5 prose-strong:text-gray-900 prose-code:text-primary-700 prose-code:bg-primary-50 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-xs prose-a:text-primary-600 prose-a:no-underline hover:prose-a:underline prose-ul:my-2 prose-ol:my-2">
+                  <ReactMarkdown>{response.answer}</ReactMarkdown>
+                </div>
               </div>
+
+              {/* Sources footer zone */}
+              {hasSources && (
+                <div className="border-t border-gray-100 bg-gray-50/80 px-6 py-4">
+                  <h4 className="text-xs font-semibold text-gray-500 tracking-wide uppercase mb-3">
+                    Sources ({response.sources!.length})
+                  </h4>
+                  <div className="flex flex-wrap gap-2">
+                    {response.sources!.map((source, index) => (
+                      <button
+                        key={source.document_id}
+                        onClick={() => setPreviewSource(source)}
+                        className="group inline-flex items-center gap-2 px-3 py-1.5 bg-white rounded-lg border border-gray-200 text-sm hover:border-primary-400 hover:shadow-sm transition-all cursor-pointer"
+                      >
+                        <span className="w-5 h-5 rounded bg-primary-100 text-primary-700 text-xs font-semibold flex items-center justify-center flex-shrink-0">
+                          {index + 1}
+                        </span>
+                        <span className="font-medium text-gray-800">{source.file_name}</span>
+                        <span className="text-gray-500 text-xs">
+                          ({source.chunks_used} chunk{source.chunks_used > 1 ? 's' : ''})
+                        </span>
+                        <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${getDocTypeColor(source.detected_doc_type)}`}>
+                          {source.detected_doc_type}
+                        </span>
+                        <ExternalLink className="w-3 h-3 text-gray-400 group-hover:text-primary-500 transition-colors" />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
+          ) : (
+            /* Standalone sources card when no AI answer */
+            hasSources && (
+              <div className="card mb-8 bg-gray-50 border-gray-200">
+                <h4 className="text-xs font-semibold text-gray-500 tracking-wide uppercase mb-3">
+                  Sources ({response.sources!.length})
+                </h4>
+                <div className="flex flex-wrap gap-2">
+                  {response.sources!.map((source, index) => (
+                    <button
+                      key={source.document_id}
+                      onClick={() => setPreviewSource(source)}
+                      className="group inline-flex items-center gap-2 px-3 py-1.5 bg-white rounded-lg border border-gray-200 text-sm hover:border-primary-400 hover:shadow-sm transition-all cursor-pointer"
+                    >
+                      <span className="w-5 h-5 rounded bg-primary-100 text-primary-700 text-xs font-semibold flex items-center justify-center flex-shrink-0">
+                        {index + 1}
+                      </span>
+                      <span className="font-medium text-gray-800">{source.file_name}</span>
+                      <span className="text-gray-500 text-xs">
+                        ({source.chunks_used} chunk{source.chunks_used > 1 ? 's' : ''})
+                      </span>
+                      <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${getDocTypeColor(source.detected_doc_type)}`}>
+                        {source.detected_doc_type}
+                      </span>
+                      <ExternalLink className="w-3 h-3 text-gray-400 group-hover:text-primary-500 transition-colors" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )
           )}
 
           {/* Search Results */}

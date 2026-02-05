@@ -111,6 +111,9 @@ class DocumentProcessor:
                     file_name=file_path.name,
                 )
 
+            # Free DataFrame memory after chunking
+            parse_result.dataframe = None
+
             if not chunks:
                 logger.warning(f"No chunks created for: {file_path}")
                 return None
@@ -126,6 +129,7 @@ class DocumentProcessor:
                 "file_name": file_path.name,
                 "detected_doc_type": enrichment.document_type,
                 "summary": enrichment.summary,
+                "entities": enrichment.entities,
             }
 
             try:
@@ -336,6 +340,7 @@ class DocumentProcessor:
             "file_name": file_path.name,
             "detected_doc_type": enrichment.document_type,
             "summary": enrichment.summary,
+            "entities": enrichment.entities,
         }
 
         try:
@@ -491,6 +496,7 @@ class DocumentProcessor:
                 "file_name": doc.file_name,
                 "detected_doc_type": enrichment.document_type,
                 "summary": enrichment.summary,
+                "entities": enrichment.entities,
             }
 
             try:
@@ -665,6 +671,7 @@ class DocumentProcessor:
             "file_name": doc.file_name,
             "detected_doc_type": doc.detected_doc_type,
             "summary": doc.summary,
+            "entities": doc.entities,
         }
 
         # Enrich

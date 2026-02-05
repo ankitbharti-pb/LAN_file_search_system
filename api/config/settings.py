@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_model: str = "gemini-1.5-flash"
 
+    # Separate model overrides (empty = use the base openai_model / gemini_model)
+    enrichment_model: str = ""   # Model for chunk enrichment (e.g., "gpt-4.1-nano")
+    synthesis_model: str = ""    # Model for response synthesis (e.g., "gpt-4.1-mini")
+
     # VLM Configuration
     vlm_provider: Literal["ollama", "huggingface"] = "ollama"
     use_vlm_extraction: bool = True
@@ -60,6 +64,10 @@ class Settings(BaseSettings):
     semantic_similarity_threshold: float = 0.72  # Lowered from 0.80 for better topic detection
     enable_chunk_links: bool = True  # Enable cross-chunk context linking
 
+    # CSV Row-Batch Chunking
+    csv_rows_per_chunk: int = 50  # Number of rows per data chunk
+    csv_max_rows_to_index: int = 0  # Safety cap (0 = no limit)
+
     # Cache Configuration
     cache_ttl_seconds: int = 3600
     cache_similarity_threshold: float = 0.92
@@ -67,6 +75,11 @@ class Settings(BaseSettings):
 
     # Search Configuration
     search_top_k: int = 10
+
+    # Synthesis Configuration
+    synthesis_max_tokens: int = 1500
+    synthesis_temperature: float = 0.1
+    synthesis_max_chunks: int = 10  # Number of top chunks sent to LLM
 
     # RRF (Reciprocal Rank Fusion) Configuration
     rrf_k_constant: int = 30  # Lower value = better discrimination (was 60)
