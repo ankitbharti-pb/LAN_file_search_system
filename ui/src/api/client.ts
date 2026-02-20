@@ -12,6 +12,8 @@ export interface SearchResult {
   heading_path?: string
   highlights: string[]
   entities: Record<string, unknown>
+  temporal_context?: string
+  chunk_title?: string
 }
 
 export interface SourceInfo {
@@ -445,32 +447,32 @@ class APIClient {
 
   // Chunking API
   async chunkDocument(docId: string): Promise<ChunkingResponse> {
-    return this.fetch<ChunkingResponse>(`/processing/${docId}/chunk`, { method: 'POST' })
+    return this.fetch<ChunkingResponse>(`/chunking/${docId}/chunk`, { method: 'POST' })
   }
 
   async enrichChunks(docId: string): Promise<EnrichmentResponse> {
-    return this.fetch<EnrichmentResponse>(`/processing/${docId}/enrich`, { method: 'POST' })
+    return this.fetch<EnrichmentResponse>(`/chunking/${docId}/enrich`, { method: 'POST' })
   }
 
   async indexVectors(docId: string): Promise<IndexingResponse> {
-    return this.fetch<IndexingResponse>(`/processing/${docId}/index-vectors`, { method: 'POST' })
+    return this.fetch<IndexingResponse>(`/chunking/${docId}/index-vectors`, { method: 'POST' })
   }
 
   async getChunks(docId: string): Promise<ChunkListResponse> {
-    return this.fetch<ChunkListResponse>(`/processing/${docId}/chunks`)
+    return this.fetch<ChunkListResponse>(`/chunking/${docId}/chunks`)
   }
 
   async getChunkDetail(docId: string, chunkId: string): Promise<ChunkDetailResponse> {
-    return this.fetch<ChunkDetailResponse>(`/processing/${docId}/chunks/${chunkId}`)
+    return this.fetch<ChunkDetailResponse>(`/chunking/${docId}/chunks/${chunkId}`)
   }
 
   async getChunkTree(docId: string): Promise<ChunkTreeResponse> {
-    return this.fetch<ChunkTreeResponse>(`/processing/${docId}/chunk-tree`)
+    return this.fetch<ChunkTreeResponse>(`/chunking/${docId}/chunk-tree`)
   }
 
   async testRetrieval(docId: string, query: string, k = 10): Promise<RetrievalDebugResponse> {
     return this.fetch<RetrievalDebugResponse>(
-      `/processing/${docId}/test-retrieval?query=${encodeURIComponent(query)}&k=${k}`,
+      `/chunking/${docId}/test-retrieval?query=${encodeURIComponent(query)}&k=${k}`,
       { method: 'POST' }
     )
   }

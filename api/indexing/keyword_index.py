@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List, Tuple, Set
 
 from config.settings import settings
+from core.domain_knowledge import INSURANCE_ACRONYMS, INSURANCE_SYNONYMS
 
 logger = logging.getLogger(__name__)
 
@@ -24,46 +25,6 @@ STOPWORDS: Set[str] = {
     "then", "once", "if", "because", "until", "while", "about", "into",
     "through", "during", "before", "after", "above", "below", "between",
     "under", "again", "further", "any", "being", "having", "doing",
-}
-
-# Insurance domain-specific synonyms for query expansion
-INSURANCE_SYNONYMS: dict[str, List[str]] = {
-    "policy": ["coverage", "plan", "contract"],
-    "premium": ["rate", "cost", "price", "payment"],
-    "claim": ["loss", "incident", "occurrence"],
-    "deductible": ["excess", "retention", "selfinsured"],
-    "coverage": ["protection", "insurance", "policy"],
-    "endorsement": ["rider", "amendment", "addendum"],
-    "underwriting": ["riskassessment", "evaluation"],
-    "insured": ["policyholder", "client", "customer"],
-    "beneficiary": ["payee", "recipient"],
-    "carrier": ["insurer", "company", "provider"],
-    "agent": ["broker", "producer", "representative"],
-    "renewal": ["extension", "continuation"],
-    "cancellation": ["termination", "void", "cancel"],
-    "exclusion": ["exception", "limitation"],
-    "limit": ["maximum", "cap", "ceiling"],
-    "liability": ["responsibility", "obligation"],
-    "peril": ["risk", "hazard", "danger"],
-    "sublimit": ["sublimitation", "internalimit"],
-    "coinsurance": ["costsharing", "copay"],
-    "indemnity": ["compensation", "reimbursement"],
-}
-
-# Insurance acronyms for expansion
-INSURANCE_ACRONYMS: dict[str, str] = {
-    "coi": "certificate of insurance",
-    "gl": "general liability",
-    "wc": "workers compensation",
-    "bop": "business owners policy",
-    "epli": "employment practices liability",
-    "dno": "directors officers",
-    "eno": "errors omissions",
-    "pip": "personal injury protection",
-    "um": "uninsured motorist",
-    "uim": "underinsured motorist",
-    "bi": "bodily injury",
-    "pd": "property damage",
 }
 
 

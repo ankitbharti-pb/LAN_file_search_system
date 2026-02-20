@@ -4,6 +4,11 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from core.domain_knowledge import (
+    CATEGORY_KEYWORDS,
+    DOC_TYPE_KEYWORDS,
+    SYNTHESIS_KEYWORDS,
+)
 from enrichment.llm_client import get_llm_client
 from enrichment.prompts import QUERY_UNDERSTANDING_PROMPT
 
@@ -19,43 +24,11 @@ class QueryIntent:
     entity_filters: dict[str, Any] = field(default_factory=dict)
     needs_synthesis: bool = False
     query_type: Literal["factual", "exploratory", "comparative", "aggregation"] = "factual"
+    preferred_categories: list[str] = field(default_factory=list)
 
 
 class QueryProcessor:
     """Processes and understands search queries."""
-
-    # Keywords that suggest specific document types (insurance domain)
-    DOC_TYPE_KEYWORDS = {
-        "policy_wording": ["policy wording", "policy document", "terms and conditions", "coverage terms", "policy terms", "wording"],
-        "endorsement": ["endorsement", "amendment", "rider", "addendum", "policy change", "modification"],
-        "certificate": ["certificate", "coi", "certificate of insurance", "proof of insurance", "cert"],
-        "claim": ["claim", "claim form", "loss notice", "incident report", "claim submission", "fnol"],
-        "underwriting": ["underwriting", "risk assessment", "underwriting guide", "risk evaluation", "uw guide"],
-        "premium": ["premium", "rate", "pricing", "premium schedule", "rate sheet", "quote"],
-        "process": ["process", "procedure", "workflow", "how to", "step by step", "sop", "guide"],
-        "announcement": ["announcement", "update", "news", "bulletin", "notice", "memo"],
-        "compliance": ["compliance", "regulatory", "audit", "regulation", "requirement", "filing"],
-        "renewal": ["renewal", "renew", "expiration", "policy renewal", "renewal notice"],
-        "cancellation": ["cancel", "cancellation", "termination", "policy cancellation", "non-renewal"],
-        "coverage": ["coverage", "coverage summary", "declarations", "dec page", "limits"],
-        "training": ["training", "onboarding", "education", "learning", "course"],
-    }
-
-    # Keywords that suggest need for synthesis
-    SYNTHESIS_KEYWORDS = [
-        "summarize",
-        "explain",
-        "compare",
-        "difference",
-        "relationship",
-        "how does",
-        "why",
-        "what is the",
-        "overview",
-        "total",
-        "average",
-        "trend",
-    ]
 
     def __init__(self, use_llm: bool = False):
         """
@@ -83,6 +56,7 @@ class QueryProcessor:
         doc_type = self._detect_doc_type(query_lower)
         needs_synthesis = self._detect_synthesis_need(query_lower)
         query_type = self._detect_query_type(query_lower)
+        preferred_categories = self._detect_preferred_categories(query_lower)
 
         # For complex queries, optionally use LLM
         if self.use_llm and needs_synthesis:
@@ -97,11 +71,12 @@ class QueryProcessor:
             entity_filters={},
             needs_synthesis=needs_synthesis,
             query_type=query_type,
+            preferred_categories=preferred_categories,
         )
 
     def _detect_doc_type(self, query: str) -> str | None:
         """Detect if query is looking for specific document type."""
-        for doc_type, keywords in self.DOC_TYPE_KEYWORDS.items():
+        for doc_type, keywords in DOC_TYPE_KEYWORDS.items():
             for keyword in keywords:
                 if keyword in query:
                     return doc_type
@@ -109,7 +84,7 @@ class QueryProcessor:
 
     def _detect_synthesis_need(self, query: str) -> bool:
         """Detect if query needs LLM synthesis."""
-        for keyword in self.SYNTHESIS_KEYWORDS:
+        for keyword in SYNTHESIS_KEYWORDS:
             if keyword in query:
                 return True
 
@@ -122,6 +97,16 @@ class QueryProcessor:
             return True
 
         return False
+
+    def _detect_preferred_categories(self, query: str) -> list[str]:
+        """Detect preferred chunk categories based on query intent."""
+        categories = []
+        for category, keywords in CATEGORY_KEYWORDS.items():
+            for keyword in keywords:
+                if keyword in query:
+                    categories.append(category)
+                    break  # One match per category is enough
+        return categories
 
     def _detect_query_type(
         self, query: str

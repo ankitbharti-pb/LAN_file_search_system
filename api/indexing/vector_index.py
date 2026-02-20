@@ -143,10 +143,8 @@ class VectorIndex:
                 removed += 1
         return removed
 
-    def save(self, index_path: Path | None = None, id_map_path: Path | None = None) -> None:
+    def save(self, index_path: Path, id_map_path: Path) -> None:
         """Save the index and ID mappings to disk."""
-        index_path = index_path or settings.faiss_index_path
-        id_map_path = id_map_path or settings.faiss_id_map_path
 
         # Create directories
         index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -171,10 +169,8 @@ class VectorIndex:
             json.dump(mappings, f)
         logger.info(f"Saved ID mappings to {id_map_path}")
 
-    def load(self, index_path: Path | None = None, id_map_path: Path | None = None) -> bool:
+    def load(self, index_path: Path, id_map_path: Path) -> bool:
         """Load the index and ID mappings from disk."""
-        index_path = index_path or settings.faiss_index_path
-        id_map_path = id_map_path or settings.faiss_id_map_path
 
         if not index_path.exists() or not id_map_path.exists():
             logger.info("No existing index found")

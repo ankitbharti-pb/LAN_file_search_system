@@ -1,6 +1,5 @@
 """Structure-aware text chunking with context prepending."""
 
-import hashlib
 import logging
 from typing import Any
 
@@ -8,8 +7,14 @@ import pandas as pd
 
 from models.chunk import Chunk, ChunkMetadata
 from parsers.base import ParseResult, HeadingInfo
-from enrichment.entity_extractor import EnrichmentResult
+from models.enrichment import EnrichmentResult
 from config.settings import settings
+from indexing.chunk_utils import (
+    build_chunk_context,
+    generate_chunk_id,
+    establish_chunk_links,
+    split_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -385,130 +390,15 @@ class Chunker:
 
     def _split_text(self, text: str) -> list[str]:
         """Split text into chunks, respecting paragraph and sentence boundaries."""
-        chunks = []
-        current_chunk = ""
+        return split_text(text, self.chunk_size)
 
-        # Split by paragraphs first
-        paragraphs = text.split("\n\n")
-
-        for para in paragraphs:
-            para = para.strip()
-            if not para:
-                continue
-
-            if len(current_chunk) + len(para) <= self.chunk_size:
-                current_chunk += para + "\n\n"
-            else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-
-                if len(para) > self.chunk_size:
-                    # Split long paragraphs by sentences
-                    long_para_chunks = self._split_long_paragraph(para)
-                    for lpc in long_para_chunks:
-                        chunks.append(lpc)
-                    current_chunk = ""
-                else:
-                    current_chunk = para + "\n\n"
-
-        if current_chunk.strip():
-            chunks.append(current_chunk.strip())
-
-        return chunks
-
-    def _split_long_paragraph(self, text: str) -> list[str]:
-        """Split a long paragraph by sentences."""
-        chunks = []
-        current_chunk = ""
-
-        # Simple sentence splitting
-        sentences = text.replace(". ", ".|").replace("? ", "?|").replace("! ", "!|").split("|")
-
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-
-            if len(current_chunk) + len(sentence) <= self.chunk_size:
-                current_chunk += sentence + " "
-            else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                current_chunk = sentence + " "
-
-        if current_chunk.strip():
-            chunks.append(current_chunk.strip())
-
-        return chunks
-
-    def _build_context(
-        self,
-        file_name: str,
-        doc_type: str,
-        heading_path: str,
-        entities: dict[str, Any],
-        prev_summary: str | None = None,
-        next_summary: str | None = None,
-        contextual_description: str | None = None,
-    ) -> str:
-        """Build context prefix for a chunk including cross-chunk context.
-
-        Args:
-            file_name: Name of the document file
-            doc_type: Detected document type
-            heading_path: Section hierarchy path
-            entities: Document-level entities
-            prev_summary: Summary of previous chunk for context
-            next_summary: Summary of next chunk for context
-            contextual_description: LLM-generated description of this chunk's role
-
-        Returns:
-            Context string to prepend to chunk text
-        """
-        lines = [
-            f"Document: {file_name}",
-            f"Type: {doc_type}",
-        ]
-        if heading_path:
-            lines.append(f"Section: {heading_path}")
-
-        # Add key entities (limit to top 5)
-        if entities:
-            entity_strs = [f"{k}={v}" for k, v in list(entities.items())[:5]]
-            if entity_strs:
-                lines.append(f"Key info: {', '.join(entity_strs)}")
-
-        # Add cross-chunk context if enabled
-        if settings.enable_chunk_links:
-            if prev_summary:
-                lines.append(f"Previous context: {prev_summary}")
-            if next_summary:
-                lines.append(f"Following context: {next_summary}")
-
-        # Add LLM-generated contextual description
-        if contextual_description:
-            lines.append(f"Context: {contextual_description}")
-
-        return "\n".join(lines)
+    def _build_context(self, **kwargs) -> str:
+        """Build context prefix for a chunk (delegates to chunk_utils)."""
+        return build_chunk_context(**kwargs)
 
     def _establish_chunk_links(self, chunks: list[Chunk]) -> None:
-        """Establish cross-chunk navigation links.
-
-        Sets prev_chunk_id / next_chunk_id for navigation.
-        Summaries are populated later by rebuild_contextualized_text()
-        using LLM enrichment results.
-
-        Args:
-            chunks: List of chunks to link together
-        """
-        if not settings.enable_chunk_links or len(chunks) < 2:
-            return
-
-        for i, chunk in enumerate(chunks):
-            if i > 0:
-                chunk.prev_chunk_id = chunks[i - 1].id
-            if i < len(chunks) - 1:
-                chunk.next_chunk_id = chunks[i + 1].id
+        """Establish cross-chunk navigation links (delegates to chunk_utils)."""
+        establish_chunk_links(chunks)
 
     def _detect_heading(
         self, text: str, headings: list[HeadingInfo]
@@ -547,9 +437,8 @@ class Chunker:
         return "\n".join(lines)
 
     def _generate_chunk_id(self, document_id: str, chunk_index: int) -> str:
-        """Generate a unique chunk ID."""
-        content = f"{document_id}:{chunk_index}"
-        return hashlib.sha256(content.encode()).hexdigest()[:16]
+        """Generate a unique chunk ID (delegates to chunk_utils)."""
+        return generate_chunk_id(document_id, chunk_index)
 
 
 def rebuild_contextualized_text(
@@ -576,8 +465,6 @@ def rebuild_contextualized_text(
     Returns:
         The same chunks list, mutated with rebuilt contextualized_text
     """
-    _chunker = Chunker()
-
     for i, chunk in enumerate(chunks):
         # Get enrichment data for prev/next/self
         prev_summary = None
@@ -599,8 +486,8 @@ def rebuild_contextualized_text(
             if self_meta and self_meta.contextual_description:
                 contextual_desc = self_meta.contextual_description
 
-        # Rebuild context using _build_context with enrichment data
-        context = _chunker._build_context(
+        # Rebuild context using shared utility
+        context = build_chunk_context(
             file_name=file_name,
             doc_type=doc_type,
             heading_path=chunk.heading_path or "",

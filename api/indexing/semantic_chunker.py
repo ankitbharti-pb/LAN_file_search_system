@@ -3,8 +3,6 @@
 import re
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 from models.chunk import Chunk
 from config.settings import settings
 
@@ -52,7 +50,7 @@ class SemanticChunker:
         # Calculate similarities between consecutive sentences
         similarities = []
         for i in range(len(embeddings) - 1):
-            sim = self._cosine_similarity(embeddings[i], embeddings[i + 1])
+            sim = self.embedder.similarity(embeddings[i], embeddings[i + 1])
             similarities.append(sim)
 
         # Find breakpoints where similarity drops below threshold
@@ -134,17 +132,6 @@ class SemanticChunker:
                 })
 
         return sentences
-
-    def _cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
-        """Calculate cosine similarity between two vectors."""
-        dot_product = np.dot(vec1, vec2)
-        norm1 = np.linalg.norm(vec1)
-        norm2 = np.linalg.norm(vec2)
-
-        if norm1 == 0 or norm2 == 0:
-            return 0.0
-
-        return float(dot_product / (norm1 * norm2))
 
     def _split_at_breakpoints(
         self,
@@ -253,7 +240,7 @@ class SemanticChunker:
 
             # Calculate similarities
             for i in range(1, len(sorted_chunks)):
-                sim = self._cosine_similarity(embeddings[i - 1], embeddings[i])
+                sim = self.embedder.similarity(embeddings[i - 1], embeddings[i])
                 sorted_chunks[i].semantic_similarity_prev = sim
 
                 # Mark as semantic boundary if similarity is low

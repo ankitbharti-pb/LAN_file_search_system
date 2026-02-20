@@ -64,16 +64,6 @@ class Chunk(BaseModel):
     )
 
 
-class ChunkWithScore(BaseModel):
-    """Chunk with search relevance score."""
-
-    chunk: Chunk
-    score: float = Field(description="Relevance score (0-1)")
-    source: Literal["vector", "keyword", "hybrid", "main_vector", "summary_vector", "question_vector", "bm25"] = Field(
-        default="hybrid", description="Which search method found this chunk"
-    )
-
-
 class ChunkMetadata(BaseModel):
     """LLM-enriched metadata for a chunk."""
 

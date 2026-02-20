@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from core.file_utils import get_file_type
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,7 +22,7 @@ class TabularProcessor:
         Returns:
             Markdown-formatted description and sample data
         """
-        file_type = file_path.suffix.lower().lstrip(".")
+        file_type = get_file_type(file_path)
         logger.info(f"Processing tabular file: {file_path} (type: {file_type})")
 
         if file_type == "csv":

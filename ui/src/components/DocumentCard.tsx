@@ -1,3 +1,4 @@
+import { Calendar } from 'lucide-react'
 import { SearchResult } from '../api/client'
 import { FILE_TYPE_ICONS } from '../utils/constants'
 
@@ -43,12 +44,25 @@ export default function DocumentCard({ result }: DocumentCardProps) {
         </div>
       </div>
 
+      {/* Chunk Title */}
+      {result.chunk_title && (
+        <h4 className="text-sm font-medium text-gray-800 mb-1">{result.chunk_title}</h4>
+      )}
+
       {/* Content Preview */}
       <div className="mb-4">
         <p className="text-gray-700 text-sm leading-relaxed line-clamp-3">
           {result.chunk_text}
         </p>
       </div>
+
+      {/* Temporal Context */}
+      {result.temporal_context && (
+        <div className="mb-4 text-xs text-amber-700 bg-amber-50 px-2 py-1 rounded flex items-center gap-1">
+          <Calendar className="w-3 h-3" />
+          {result.temporal_context}
+        </div>
+      )}
 
       {/* Highlights */}
       {result.highlights.length > 0 && (

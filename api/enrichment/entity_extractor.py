@@ -1,31 +1,22 @@
 """Dynamic entity extraction using LLM."""
 
 import logging
-from dataclasses import dataclass, field
 from typing import Any
 
+from core.file_utils import is_tabular
 from enrichment.llm_client import LLMClient, get_llm_client
 from enrichment.prompts import (
     DOCUMENT_ENRICHMENT_SYSTEM_PROMPT,
     DOCUMENT_ENRICHMENT_PROMPT,
     TABULAR_ENRICHMENT_PROMPT,
 )
+from models.enrichment import EnrichmentResult
 from parsers.base import ParseResult
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class EnrichmentResult:
-    """Result of LLM enrichment."""
-
-    document_type: str = "unknown"
-    summary: str = ""
-    entities: dict[str, Any] = field(default_factory=dict)
-    key_topics: list[str] = field(default_factory=list)
-    table_descriptions: list[str] = field(default_factory=list)
-    success: bool = True
-    error: str | None = None
+# Re-export for backward compatibility
+__all__ = ["EnrichmentResult", "EntityExtractor", "entity_extractor"]
 
 
 class EntityExtractor:
@@ -51,10 +42,8 @@ class EntityExtractor:
     ) -> EnrichmentResult:
         """Enrich a parsed document with LLM-extracted metadata."""
         # Determine if tabular or document
-        is_tabular = file_type in ["csv", "xlsx", "xls"]
-
         try:
-            if is_tabular:
+            if is_tabular(file_type):
                 return await self._enrich_tabular(parse_result, file_name, file_type)
             else:
                 return await self._enrich_document(parse_result, file_name, file_type)

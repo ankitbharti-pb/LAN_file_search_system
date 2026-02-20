@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from core.file_utils import get_file_type as _get_file_type
+
 
 @dataclass
 class TableData:
@@ -60,7 +62,7 @@ class BaseParser(ABC):
 
     def supports(self, file_path: Path) -> bool:
         """Check if this parser supports the given file."""
-        return file_path.suffix.lower().lstrip(".") in self.supported_extensions
+        return _get_file_type(file_path) in self.supported_extensions
 
     @abstractmethod
     def parse(self, file_path: Path) -> ParseResult:
@@ -69,7 +71,7 @@ class BaseParser(ABC):
 
     def get_file_type(self, file_path: Path) -> str:
         """Get the file type from the path."""
-        return file_path.suffix.lower().lstrip(".")
+        return _get_file_type(file_path)
 
 
 # Document types processed via manual pipeline (DocLayout-YOLO)
@@ -95,7 +97,7 @@ class ParserRegistry:
 
     def is_supported(self, file_path: Path) -> bool:
         """Check if any parser supports this file type."""
-        ext = file_path.suffix.lower().lstrip(".")
+        ext = _get_file_type(file_path)
         # Check document extensions (manual processing)
         if ext in DOCUMENT_EXTENSIONS:
             return True
@@ -104,7 +106,7 @@ class ParserRegistry:
 
     def is_document(self, file_path: Path) -> bool:
         """Check if file is a document type (manual processing)."""
-        ext = file_path.suffix.lower().lstrip(".")
+        ext = _get_file_type(file_path)
         return ext in DOCUMENT_EXTENSIONS
 
     def is_tabular(self, file_path: Path) -> bool:

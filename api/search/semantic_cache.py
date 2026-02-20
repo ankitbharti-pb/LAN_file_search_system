@@ -1,5 +1,6 @@
 """Semantic cache for query responses."""
 
+import hashlib
 import logging
 import pickle
 import time
@@ -223,8 +224,6 @@ class SemanticCache:
 
     def _generate_key(self, query: str) -> str:
         """Generate a cache key from query."""
-        import hashlib
-
         return hashlib.sha256(query.lower().strip().encode()).hexdigest()[:16]
 
     def _remove(self, cache_key: str) -> None:

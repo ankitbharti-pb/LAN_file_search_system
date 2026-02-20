@@ -1,3 +1,4 @@
+
 """Box filtering for overlapping/nested bounding boxes in layout detection.
 
 This module provides algorithms to filter overlapping and nested bounding boxes

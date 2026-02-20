@@ -37,6 +37,12 @@ class SearchResultItem(BaseModel):
     temporal_context: str | None = Field(
         default=None, description="Temporal applicability of this result"
     )
+    chunk_title: str | None = Field(
+        default=None, description="LLM-generated title for this chunk"
+    )
+    chunk_keywords: list[str] = Field(
+        default_factory=list, description="LLM-extracted keywords for this chunk"
+    )
 
 
 class SearchResponse(BaseModel):

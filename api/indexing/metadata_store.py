@@ -322,46 +322,44 @@ class MetadataStore:
 
     async def get_document_by_path(self, file_path: str) -> Document | None:
         """Get a document by file path."""
-        async with self._write_db() as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT * FROM documents WHERE file_path = ?", (file_path,)
-            )
-            row = await cursor.fetchone()
+        db = await self._get_db()
+        cursor = await db.execute(
+            "SELECT * FROM documents WHERE file_path = ?", (file_path,)
+        )
+        row = await cursor.fetchone()
 
-            if not row:
-                return None
+        if not row:
+            return None
 
-            return self._row_to_document(row)
+        return self._row_to_document(row)
 
     async def get_all_documents(
         self, skip: int = 0, limit: int = 100
     ) -> list[DocumentSummary]:
         """Get all documents with pagination."""
-        async with self._write_db() as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                """
-                SELECT id, file_name, file_type, detected_doc_type, summary, indexed_at
-                FROM documents
-                ORDER BY indexed_at DESC
-                LIMIT ? OFFSET ?
-                """,
-                (limit, skip),
-            )
-            rows = await cursor.fetchall()
+        db = await self._get_db()
+        cursor = await db.execute(
+            """
+            SELECT id, file_name, file_type, detected_doc_type, summary, indexed_at
+            FROM documents
+            ORDER BY indexed_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, skip),
+        )
+        rows = await cursor.fetchall()
 
-            return [
-                DocumentSummary(
-                    id=row["id"],
-                    file_name=row["file_name"],
-                    file_type=row["file_type"],
-                    detected_doc_type=row["detected_doc_type"],
-                    summary=row["summary"],
-                    indexed_at=datetime.fromisoformat(row["indexed_at"]),
-                )
-                for row in rows
-            ]
+        return [
+            DocumentSummary(
+                id=row["id"],
+                file_name=row["file_name"],
+                file_type=row["file_type"],
+                detected_doc_type=row["detected_doc_type"],
+                summary=row["summary"],
+                indexed_at=datetime.fromisoformat(row["indexed_at"]),
+            )
+            for row in rows
+        ]
 
     async def get_documents_by_ids(self, document_ids: list[str]) -> list[Document]:
         """Batch fetch documents by IDs."""
@@ -528,33 +526,34 @@ class MetadataStore:
 
     async def get_statistics(self) -> dict[str, Any]:
         """Get index statistics."""
-        async with self._write_db() as db:
-            # Total documents
-            cursor = await db.execute("SELECT COUNT(*) FROM documents")
-            total_docs = (await cursor.fetchone())[0]
+        db = await self._get_db()
 
-            # Total chunks
-            cursor = await db.execute("SELECT COUNT(*) FROM chunks")
-            total_chunks = (await cursor.fetchone())[0]
+        # Total documents
+        cursor = await db.execute("SELECT COUNT(*) FROM documents")
+        total_docs = (await cursor.fetchone())[0]
 
-            # Documents by type
-            cursor = await db.execute(
-                "SELECT detected_doc_type, COUNT(*) FROM documents GROUP BY detected_doc_type"
-            )
-            by_type = {row[0]: row[1] for row in await cursor.fetchall()}
+        # Total chunks
+        cursor = await db.execute("SELECT COUNT(*) FROM chunks")
+        total_chunks = (await cursor.fetchone())[0]
 
-            # Documents by file type
-            cursor = await db.execute(
-                "SELECT file_type, COUNT(*) FROM documents GROUP BY file_type"
-            )
-            by_file_type = {row[0]: row[1] for row in await cursor.fetchall()}
+        # Documents by type
+        cursor = await db.execute(
+            "SELECT detected_doc_type, COUNT(*) FROM documents GROUP BY detected_doc_type"
+        )
+        by_type = {row[0]: row[1] for row in await cursor.fetchall()}
 
-            return {
-                "total_documents": total_docs,
-                "total_chunks": total_chunks,
-                "documents_by_detected_type": by_type,
-                "documents_by_file_type": by_file_type,
-            }
+        # Documents by file type
+        cursor = await db.execute(
+            "SELECT file_type, COUNT(*) FROM documents GROUP BY file_type"
+        )
+        by_file_type = {row[0]: row[1] for row in await cursor.fetchall()}
+
+        return {
+            "total_documents": total_docs,
+            "total_chunks": total_chunks,
+            "documents_by_detected_type": by_type,
+            "documents_by_file_type": by_file_type,
+        }
 
     # ============== Document Processing Methods ==============
 
@@ -608,19 +607,19 @@ class MetadataStore:
 
     async def get_document_markdown(self, document_id: str) -> dict | None:
         """Get the markdown content for a document."""
-        async with self._write_db() as db:
-            cursor = await db.execute(
-                "SELECT extracted_markdown, reviewed_markdown, processing_status FROM documents WHERE id = ?",
-                (document_id,),
-            )
-            row = await cursor.fetchone()
-            if not row:
-                return None
-            return {
-                "extracted_markdown": row[0],
-                "reviewed_markdown": row[1],
-                "processing_status": row[2],
-            }
+        db = await self._get_db()
+        cursor = await db.execute(
+            "SELECT extracted_markdown, reviewed_markdown, processing_status FROM documents WHERE id = ?",
+            (document_id,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "extracted_markdown": row[0],
+            "reviewed_markdown": row[1],
+            "processing_status": row[2],
+        }
 
     async def update_document_enrichment(
         self,
@@ -700,44 +699,16 @@ class MetadataStore:
 
     async def get_pages(self, document_id: str) -> list[dict]:
         """Get all pages for a document."""
-        async with self._write_db() as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                """SELECT * FROM document_pages
-                   WHERE document_id = ?
-                   ORDER BY page_number""",
-                (document_id,),
-            )
-            rows = await cursor.fetchall()
-            return [
-                {
-                    "id": row["id"],
-                    "document_id": row["document_id"],
-                    "page_number": row["page_number"],
-                    "image_path": row["image_path"],
-                    "annotated_image_path": row["annotated_image_path"],
-                    "unfiltered_annotated_image_path": row["unfiltered_annotated_image_path"],
-                    "layout_json": row["layout_json"],
-                    "unfiltered_layout_json": row["unfiltered_layout_json"],
-                    "filter_stats_json": row["filter_stats_json"],
-                    "extracted_text": row["extracted_text"],
-                }
-                for row in rows
-            ]
-
-    async def get_page(self, document_id: str, page_number: int) -> dict | None:
-        """Get a specific page for a document."""
-        async with self._write_db() as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                """SELECT * FROM document_pages
-                   WHERE document_id = ? AND page_number = ?""",
-                (document_id, page_number),
-            )
-            row = await cursor.fetchone()
-            if not row:
-                return None
-            return {
+        db = await self._get_db()
+        cursor = await db.execute(
+            """SELECT * FROM document_pages
+               WHERE document_id = ?
+               ORDER BY page_number""",
+            (document_id,),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
                 "id": row["id"],
                 "document_id": row["document_id"],
                 "page_number": row["page_number"],
@@ -749,6 +720,32 @@ class MetadataStore:
                 "filter_stats_json": row["filter_stats_json"],
                 "extracted_text": row["extracted_text"],
             }
+            for row in rows
+        ]
+
+    async def get_page(self, document_id: str, page_number: int) -> dict | None:
+        """Get a specific page for a document."""
+        db = await self._get_db()
+        cursor = await db.execute(
+            """SELECT * FROM document_pages
+               WHERE document_id = ? AND page_number = ?""",
+            (document_id, page_number),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "document_id": row["document_id"],
+            "page_number": row["page_number"],
+            "image_path": row["image_path"],
+            "annotated_image_path": row["annotated_image_path"],
+            "unfiltered_annotated_image_path": row["unfiltered_annotated_image_path"],
+            "layout_json": row["layout_json"],
+            "unfiltered_layout_json": row["unfiltered_layout_json"],
+            "filter_stats_json": row["filter_stats_json"],
+            "extracted_text": row["extracted_text"],
+        }
 
     async def delete_pages(self, document_id: str) -> int:
         """Delete all pages for a document."""
@@ -903,15 +900,14 @@ class MetadataStore:
 
     async def get_chunk_metadata(self, chunk_id: str) -> ChunkMetadata | None:
         """Get metadata for a chunk."""
-        async with self._write_db() as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT * FROM chunk_metadata WHERE chunk_id = ?", (chunk_id,)
-            )
-            row = await cursor.fetchone()
-            if not row:
-                return None
-            return self._row_to_chunk_metadata(row)
+        db = await self._get_db()
+        cursor = await db.execute(
+            "SELECT * FROM chunk_metadata WHERE chunk_id = ?", (chunk_id,)
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return self._row_to_chunk_metadata(row)
 
     async def get_chunk_metadata_batch(self, chunk_ids: list[str]) -> dict[str, ChunkMetadata]:
         """Batch fetch chunk metadata by chunk IDs. Returns dict mapping chunk_id -> ChunkMetadata."""
@@ -919,14 +915,13 @@ class MetadataStore:
             return {}
 
         placeholders = ",".join("?" * len(chunk_ids))
-        async with self._write_db() as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                f"SELECT * FROM chunk_metadata WHERE chunk_id IN ({placeholders})",
-                chunk_ids,
-            )
-            rows = await cursor.fetchall()
-            return {row["chunk_id"]: self._row_to_chunk_metadata(row) for row in rows}
+        db = await self._get_db()
+        cursor = await db.execute(
+            f"SELECT * FROM chunk_metadata WHERE chunk_id IN ({placeholders})",
+            chunk_ids,
+        )
+        rows = await cursor.fetchall()
+        return {row["chunk_id"]: self._row_to_chunk_metadata(row) for row in rows}
 
     async def get_chunk_with_metadata(self, chunk_id: str) -> dict | None:
         """Get chunk with its enriched metadata."""
@@ -952,6 +947,44 @@ class MetadataStore:
             await db.commit()
             return cursor.rowcount > 0
 
+    async def filter_chunks_by_entity(
+        self, entity_key: str, entity_value: str | None = None
+    ) -> list[str]:
+        """Get chunk IDs filtered by entity key/value from chunk-level enriched metadata.
+
+        Searches the JSON entities column in chunk_metadata for matching entity types and values.
+
+        Args:
+            entity_key: Entity type to filter by (e.g., "policy_numbers", "carriers")
+            entity_value: Optional value to match within the entity list
+
+        Returns:
+            List of matching chunk IDs
+        """
+        db = await self._get_db()
+        if entity_value:
+            # Search for chunks where the entities JSON contains the key with a matching value
+            cursor = await db.execute(
+                """
+                SELECT chunk_id FROM chunk_metadata
+                WHERE json_extract(entities, ?) IS NOT NULL
+                AND entities LIKE ?
+                """,
+                (f"$.{entity_key}", f"%{entity_value}%"),
+            )
+        else:
+            # Search for chunks where the entities JSON contains the key with non-empty list
+            cursor = await db.execute(
+                """
+                SELECT chunk_id FROM chunk_metadata
+                WHERE json_extract(entities, ?) IS NOT NULL
+                AND json_array_length(json_extract(entities, ?)) > 0
+                """,
+                (f"$.{entity_key}", f"$.{entity_key}"),
+            )
+        rows = await cursor.fetchall()
+        return [row["chunk_id"] for row in rows]
+
     # ============== Chunk Questions Methods ==============
 
     async def add_chunk_questions(self, chunk_id: str, questions: list[ChunkQuestion]) -> None:
@@ -974,37 +1007,66 @@ class MetadataStore:
 
     async def get_chunk_questions(self, chunk_id: str) -> list[ChunkQuestion]:
         """Get questions for a chunk."""
-        async with self._write_db() as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT * FROM chunk_questions WHERE chunk_id = ?", (chunk_id,)
+        db = await self._get_db()
+        cursor = await db.execute(
+            "SELECT * FROM chunk_questions WHERE chunk_id = ?", (chunk_id,)
+        )
+        rows = await cursor.fetchall()
+        return [
+            ChunkQuestion(
+                id=row["id"],
+                chunk_id=row["chunk_id"],
+                question=row["question"],
+                vector_id=row["vector_id"],
             )
-            rows = await cursor.fetchall()
-            return [
-                ChunkQuestion(
-                    id=row["id"],
-                    chunk_id=row["chunk_id"],
-                    question=row["question"],
-                    vector_id=row["vector_id"],
-                )
-                for row in rows
-            ]
+            for row in rows
+        ]
+
+    async def get_chunk_questions_batch(self, chunk_ids: list[str]) -> dict[str, list[ChunkQuestion]]:
+        """Batch fetch questions keyed by chunk_id.
+
+        Args:
+            chunk_ids: List of chunk IDs to fetch questions for
+
+        Returns:
+            Dict mapping chunk_id -> list of ChunkQuestion
+        """
+        if not chunk_ids:
+            return {}
+
+        placeholders = ",".join("?" * len(chunk_ids))
+        db = await self._get_db()
+        cursor = await db.execute(
+            f"SELECT * FROM chunk_questions WHERE chunk_id IN ({placeholders})",
+            chunk_ids,
+        )
+        rows = await cursor.fetchall()
+
+        result: dict[str, list[ChunkQuestion]] = {cid: [] for cid in chunk_ids}
+        for row in rows:
+            q = ChunkQuestion(
+                id=row["id"],
+                chunk_id=row["chunk_id"],
+                question=row["question"],
+                vector_id=row["vector_id"],
+            )
+            result[row["chunk_id"]].append(q)
+        return result
 
     async def get_all_chunk_questions(self) -> list[ChunkQuestion]:
         """Get all chunk questions (for building question index)."""
-        async with self._write_db() as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM chunk_questions")
-            rows = await cursor.fetchall()
-            return [
-                ChunkQuestion(
-                    id=row["id"],
-                    chunk_id=row["chunk_id"],
-                    question=row["question"],
-                    vector_id=row["vector_id"],
-                )
-                for row in rows
-            ]
+        db = await self._get_db()
+        cursor = await db.execute("SELECT * FROM chunk_questions")
+        rows = await cursor.fetchall()
+        return [
+            ChunkQuestion(
+                id=row["id"],
+                chunk_id=row["chunk_id"],
+                question=row["question"],
+                vector_id=row["vector_id"],
+            )
+            for row in rows
+        ]
 
     async def update_question_vector_id(self, question_id: int, vector_id: str) -> bool:
         """Update the vector ID for a question."""
@@ -1122,77 +1184,74 @@ class MetadataStore:
 
     async def get_chunk_tree(self, document_id: str) -> list[dict]:
         """Get hierarchical chunk tree for a document."""
-        async with self._write_db() as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                """
-                SELECT c.*, cm.title, cm.summary, cm.category
-                FROM chunks c
-                LEFT JOIN chunk_metadata cm ON c.id = cm.chunk_id
-                WHERE c.document_id = ?
-                ORDER BY c.chunk_index
-                """,
-                (document_id,),
-            )
-            rows = await cursor.fetchall()
+        db = await self._get_db()
+        cursor = await db.execute(
+            """
+            SELECT c.*, cm.title, cm.summary, cm.category
+            FROM chunks c
+            LEFT JOIN chunk_metadata cm ON c.id = cm.chunk_id
+            WHERE c.document_id = ?
+            ORDER BY c.chunk_index
+            """,
+            (document_id,),
+        )
+        rows = await cursor.fetchall()
 
-            # Build tree structure
-            chunks_by_id = {}
-            root_chunks = []
+        # Build tree structure
+        chunks_by_id = {}
+        root_chunks = []
 
-            for row in rows:
-                chunk_data = {
-                    "id": row["id"],
-                    "text": row["text"][:100] + "..." if len(row["text"]) > 100 else row["text"],
-                    "content_type": row["content_type"],
-                    "hierarchy_level": row["hierarchy_level"] if "hierarchy_level" in row.keys() else 0,
-                    "parent_chunk_id": row["parent_chunk_id"] if "parent_chunk_id" in row.keys() else None,
-                    "chunk_index": row["chunk_index"],
-                    "title": row["title"] if "title" in row.keys() else None,
-                    "summary": row["summary"] if "summary" in row.keys() else None,
-                    "category": row["category"] if "category" in row.keys() else None,
-                    "children": [],
-                }
-                chunks_by_id[row["id"]] = chunk_data
+        for row in rows:
+            chunk_data = {
+                "id": row["id"],
+                "text": row["text"][:100] + "..." if len(row["text"]) > 100 else row["text"],
+                "content_type": row["content_type"],
+                "hierarchy_level": row["hierarchy_level"] if "hierarchy_level" in row.keys() else 0,
+                "parent_chunk_id": row["parent_chunk_id"] if "parent_chunk_id" in row.keys() else None,
+                "chunk_index": row["chunk_index"],
+                "title": row["title"] if "title" in row.keys() else None,
+                "summary": row["summary"] if "summary" in row.keys() else None,
+                "category": row["category"] if "category" in row.keys() else None,
+                "children": [],
+            }
+            chunks_by_id[row["id"]] = chunk_data
 
-                if chunk_data["parent_chunk_id"] is None:
-                    root_chunks.append(chunk_data)
+            if chunk_data["parent_chunk_id"] is None:
+                root_chunks.append(chunk_data)
 
-            # Build hierarchy
-            for chunk_id, chunk_data in chunks_by_id.items():
-                parent_id = chunk_data["parent_chunk_id"]
-                if parent_id and parent_id in chunks_by_id:
-                    chunks_by_id[parent_id]["children"].append(chunk_data)
+        # Build hierarchy
+        for chunk_id, chunk_data in chunks_by_id.items():
+            parent_id = chunk_data["parent_chunk_id"]
+            if parent_id and parent_id in chunks_by_id:
+                chunks_by_id[parent_id]["children"].append(chunk_data)
 
-            return root_chunks
+        return root_chunks
 
     async def get_child_chunks(self, parent_chunk_id: str) -> list[Chunk]:
         """Get all direct children of a chunk."""
-        async with self._write_db() as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT * FROM chunks WHERE parent_chunk_id = ? ORDER BY chunk_index",
-                (parent_chunk_id,),
-            )
-            rows = await cursor.fetchall()
-            return [self._row_to_chunk(row) for row in rows]
+        db = await self._get_db()
+        cursor = await db.execute(
+            "SELECT * FROM chunks WHERE parent_chunk_id = ? ORDER BY chunk_index",
+            (parent_chunk_id,),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_chunk(row) for row in rows]
 
     async def get_chunks_by_hierarchy_level(
         self, document_id: str, hierarchy_level: int
     ) -> list[Chunk]:
         """Get all chunks at a specific hierarchy level."""
-        async with self._write_db() as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                """
-                SELECT * FROM chunks
-                WHERE document_id = ? AND hierarchy_level = ?
-                ORDER BY chunk_index
-                """,
-                (document_id, hierarchy_level),
-            )
-            rows = await cursor.fetchall()
-            return [self._row_to_chunk(row) for row in rows]
+        db = await self._get_db()
+        cursor = await db.execute(
+            """
+            SELECT * FROM chunks
+            WHERE document_id = ? AND hierarchy_level = ?
+            ORDER BY chunk_index
+            """,
+            (document_id, hierarchy_level),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_chunk(row) for row in rows]
 
 
 # Global instance

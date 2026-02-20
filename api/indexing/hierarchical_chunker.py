@@ -1,12 +1,12 @@
 """Hierarchical chunker that respects markdown structure and layout detection."""
 
-import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Literal
 
 from models.chunk import Chunk
 from config.settings import settings
+from indexing.chunk_utils import build_chunk_context, generate_chunk_id, establish_chunk_links
 
 
 @dataclass
@@ -87,11 +87,7 @@ class HierarchicalChunker:
         )
 
         # Establish inter-chunk navigation links
-        for i in range(len(chunks)):
-            if i > 0:
-                chunks[i].prev_chunk_id = chunks[i - 1].id
-            if i < len(chunks) - 1:
-                chunks[i].next_chunk_id = chunks[i + 1].id
+        establish_chunk_links(chunks)
 
         return chunks
 
@@ -422,24 +418,16 @@ class HierarchicalChunker:
         page: int | None = None,
     ) -> Chunk:
         """Create a chunk with contextualized text."""
-        chunk_id = self._generate_chunk_id(document_id, self._chunk_index)
+        chunk_id = generate_chunk_id(document_id, self._chunk_index)
         self._chunk_index += 1
 
-        # Build contextualized text
-        context_parts = []
-        if file_name:
-            context_parts.append(f"Document: {file_name}")
-        if detected_doc_type and detected_doc_type != "unknown":
-            context_parts.append(f"Type: {detected_doc_type}")
-        if heading_path:
-            context_parts.append(f"Section: {heading_path}")
-        if entities:
-            top_entities = list(entities.items())[:5]
-            if top_entities:
-                entity_str = ", ".join(f"{k}: {v}" for k, v in top_entities)
-                context_parts.append(f"Key info: {entity_str}")
-
-        context = "\n".join(context_parts)
+        # Build contextualized text using shared utility
+        context = build_chunk_context(
+            file_name=file_name,
+            doc_type=detected_doc_type,
+            heading_path=heading_path or "",
+            entities=entities,
+        )
         contextualized_text = f"{context}\n\n{text}" if context else text
 
         return Chunk(
@@ -457,11 +445,6 @@ class HierarchicalChunker:
             page=page,
             entities=entities,
         )
-
-    def _generate_chunk_id(self, document_id: str, chunk_index: int) -> str:
-        """Generate unique chunk ID."""
-        combined = f"{document_id}:{chunk_index}"
-        return hashlib.sha256(combined.encode()).hexdigest()[:16]
 
 
 # Global instance

@@ -73,13 +73,14 @@ class ResponseGenerator:
             combined_filters["entities"] = intent.entity_filters
         logger.info(f"[Latency] query_processing: {(time.time() - t0) * 1000:.0f}ms")
 
-        # Step 3: Execute search (pass pre-computed embedding)
+        # Step 3: Execute search (pass pre-computed embedding + category preferences)
         t0 = time.time()
         search_result = await enhanced_hybrid_search.search(
             query=query,
             k=k,
             filters=combined_filters if combined_filters else None,
             query_embedding=query_embedding,
+            preferred_categories=intent.preferred_categories if intent.preferred_categories else None,
         )
         results = search_result.results
         logger.info(f"[Latency] search_total: {(time.time() - t0) * 1000:.0f}ms")
@@ -172,6 +173,9 @@ Temporal Context: {result.temporal_context or 'N/A'}
 Content:
 {result.chunk_text}
 """
+            if result.chunk_keywords:
+                part += f"Keywords: {', '.join(result.chunk_keywords)}\n"
+
             if result.entities:
                 entities_str = ", ".join(f"{k}={v}" for k, v in list(result.entities.items())[:5])
                 part += f"Key Info: {entities_str}\n"

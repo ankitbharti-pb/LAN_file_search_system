@@ -6,13 +6,14 @@ from datetime import datetime
 from pathlib import Path
 
 from config.settings import settings
+from core.file_utils import get_file_type, get_processing_dir, is_tabular
 from core.utils import generate_document_id, compute_file_hash
 from models.document import Document
 from models.chunk import Chunk, VectorEmbedding
 from parsers import parser_registry
 from parsers.base import ParseResult
 from enrichment import entity_extractor
-from enrichment.entity_extractor import EnrichmentResult
+from models.enrichment import EnrichmentResult
 from indexing.chunker import chunker, rebuild_contextualized_text
 from indexing.embedder import embedder
 from indexing.keyword_index import keyword_index
@@ -64,15 +65,15 @@ class DocumentProcessor:
         if not doc:
             raise ValueError(f"Document not found: {document_id}")
 
-        is_tabular = (doc.file_type or "").lower() in ("csv", "xlsx", "xls")
+        tabular = is_tabular(doc.file_type or "")
 
         # Resolve markdown from DB if not provided (non-tabular only)
-        if not is_tabular and markdown is None:
+        if not tabular and markdown is None:
             markdown_data = await metadata_store.get_document_markdown(document_id)
             if markdown_data:
                 markdown = markdown_data.get("reviewed_markdown") or markdown_data.get("extracted_markdown")
 
-        if not is_tabular and not markdown:
+        if not tabular and not markdown:
             raise ValueError(f"No markdown content available for: {document_id}")
 
         # Delete existing chunks + vectors
@@ -85,7 +86,7 @@ class DocumentProcessor:
             await metadata_store.delete_chunks_by_document(document_id)
 
         # Dispatch to strategy
-        if is_tabular:
+        if tabular:
             doc_chunks = self._chunk_tabular(doc)
         elif settings.chunking_strategy == "paragraph":
             doc_chunks = self._chunk_paragraph(doc, markdown)
@@ -156,6 +157,8 @@ class DocumentProcessor:
     async def index_vectors(self, document_id: str, save: bool = True) -> dict:
         """Build multi-vector index for a document.
 
+        Uses batch DB queries and batch embedding for efficiency.
+
         Args:
             document_id: Document ID to index
             save: Whether to persist indexes to disk (False for batch reindex)
@@ -169,65 +172,115 @@ class DocumentProcessor:
         if not chunks:
             raise ValueError(f"No chunks found for: {document_id}")
 
-        main_count = 0
-        summary_count = 0
-        question_count = 0
+        # --- Batch DB fetch (replaces N+1 per-chunk queries) ---
+        chunk_ids = [c.id for c in chunks]
+        meta_map = await metadata_store.get_chunk_metadata_batch(chunk_ids)
+        questions_map = await metadata_store.get_chunk_questions_batch(chunk_ids)
+
+        # --- Collect texts for batch embedding ---
+        main_texts: list[str] = []
+        main_chunk_ids: list[str] = []
+
+        summary_texts: list[str] = []
+        summary_chunk_ids: list[str] = []
+
+        question_texts: list[str] = []
+        question_meta: list[tuple[str, str, int | None]] = []  # (q_vector_id, chunk_id, q.id)
+
+        vector_embeddings: list[VectorEmbedding] = []
 
         for chunk in chunks:
-            metadata = await metadata_store.get_chunk_metadata(chunk.id)
-            questions = await metadata_store.get_chunk_questions(chunk.id)
+            metadata = meta_map.get(chunk.id)
+            questions = questions_map.get(chunk.id, [])
 
-            # Main embedding
-            main_emb = embedder.embed(chunk.contextualized_text)
-            multi_vector_index.main_index.add(chunk.id, main_emb)
-            keyword_index.add(chunk.id, chunk.text)
-            main_count += 1
+            # Main embedding text
+            main_texts.append(chunk.contextualized_text)
+            main_chunk_ids.append(chunk.id)
 
-            await metadata_store.add_vector_embedding(VectorEmbedding(
+            # Build enriched BM25 text
+            bm25_text = chunk.text
+            if metadata:
+                enrichment_parts = []
+                if metadata.title:
+                    enrichment_parts.append(metadata.title)
+                if metadata.summary:
+                    enrichment_parts.append(metadata.summary)
+                if metadata.keywords:
+                    enrichment_parts.append(" ".join(metadata.keywords))
+                if enrichment_parts:
+                    bm25_text = " ".join(enrichment_parts) + " " + bm25_text
+            keyword_index.add(chunk.id, bm25_text)
+
+            vector_embeddings.append(VectorEmbedding(
                 id=chunk.id,
                 chunk_id=chunk.id,
                 vector_type="main",
                 source_text=chunk.contextualized_text[:200],
             ))
 
-            # Summary embedding
+            # Summary embedding text
             if metadata and metadata.summary:
-                summary_emb = embedder.embed(metadata.summary)
+                summary_texts.append(metadata.summary)
+                summary_chunk_ids.append(chunk.id)
                 summary_id = f"{chunk.id}_summary"
-                multi_vector_index.summary_index.add(summary_id, summary_emb)
-                summary_count += 1
-
-                await metadata_store.add_vector_embedding(VectorEmbedding(
+                vector_embeddings.append(VectorEmbedding(
                     id=summary_id,
                     chunk_id=chunk.id,
                     vector_type="summary",
                     source_text=metadata.summary,
                 ))
 
-            # Question embeddings
+            # Question embedding texts
             for q in questions:
-                q_emb = embedder.embed(q.question)
                 q_vector_id = f"q_{chunk.id}_{q.id}"
-                multi_vector_index.question_index.add(q_vector_id, q_emb)
-                multi_vector_index._question_to_chunk[q_vector_id] = chunk.id
-
-                if q.id:
-                    await metadata_store.update_question_vector_id(q.id, q_vector_id)
-
-                await metadata_store.add_vector_embedding(VectorEmbedding(
+                question_texts.append(q.question)
+                question_meta.append((q_vector_id, chunk.id, q.id))
+                vector_embeddings.append(VectorEmbedding(
                     id=q_vector_id,
                     chunk_id=chunk.id,
                     vector_type="question",
                     source_text=q.question,
                     question_id=q.id,
                 ))
-                question_count += 1
+
+        # --- Batch embed all texts ---
+        import numpy as np
+
+        main_embeddings = embedder.embed_batch(main_texts)
+        summary_embeddings = embedder.embed_batch(summary_texts) if summary_texts else np.zeros((0, 0))
+        question_embeddings = embedder.embed_batch(question_texts) if question_texts else np.zeros((0, 0))
+
+        # --- Add to multi-vector index via public batch API ---
+        main_data = list(zip(main_chunk_ids, main_embeddings))
+        summary_data = list(zip(summary_chunk_ids, summary_embeddings)) if summary_texts else None
+        question_data = (
+            [(qm[0], qm[1], question_embeddings[i]) for i, qm in enumerate(question_meta)]
+            if question_texts else None
+        )
+
+        multi_vector_index.add_batch(
+            main_data=main_data,
+            summary_data=summary_data,
+            question_data=question_data,
+        )
+
+        # --- Update question vector IDs in DB ---
+        for q_vector_id, _chunk_id, q_id in question_meta:
+            if q_id:
+                await metadata_store.update_question_vector_id(q_id, q_vector_id)
+
+        # --- Persist vector embedding records ---
+        await metadata_store.add_vector_embeddings_batch(vector_embeddings)
 
         if save:
             multi_vector_index.save()
             keyword_index.save()
 
         await metadata_store.update_document_status(document_id, "indexed")
+
+        main_count = len(main_texts)
+        summary_count = len(summary_texts)
+        question_count = len(question_texts)
 
         logger.info(
             f"Indexed {document_id}: "
@@ -313,7 +366,7 @@ class DocumentProcessor:
             result = await metadata_store.delete_document(document_id)
 
             # Clean up processing directory
-            processing_dir = settings.data_folder / "processing" / document_id
+            processing_dir = get_processing_dir(document_id)
             if processing_dir.exists():
                 import shutil
                 shutil.rmtree(processing_dir)
@@ -438,7 +491,7 @@ class DocumentProcessor:
             return False
 
         # Step 2: Document-level enrichment
-        file_type = file_path.suffix.lower().lstrip(".")
+        file_type = get_file_type(file_path)
         enrichment = await entity_extractor.enrich(
             parse_result=parse_result,
             file_name=file_path.name,
@@ -467,13 +520,13 @@ class DocumentProcessor:
 
         # Step 4: Store markdown for non-tabular files
         markdown = parse_result.markdown if hasattr(parse_result, "markdown") and parse_result.markdown else parse_result.text
-        is_tabular = file_type in ("csv", "xlsx", "xls")
-        if not is_tabular:
+        tabular = is_tabular(file_type)
+        if not tabular:
             await metadata_store.update_document_markdown(document_id, markdown)
 
         # Step 5-7: chunk -> enrich -> index (using step methods)
         try:
-            await self.chunk_document(document_id, markdown if not is_tabular else None)
+            await self.chunk_document(document_id, markdown if not tabular else None)
         except ValueError as e:
             logger.warning(f"Chunking failed for {file_path}: {e}")
             await metadata_store.update_document_status(document_id, "failed")

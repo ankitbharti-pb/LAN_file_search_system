@@ -1,7 +1,6 @@
 """File management endpoints for browsing, uploading, and managing files."""
 
 import logging
-import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +10,13 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import FileResponse
 
 from config.settings import settings
+from core.constants import SUPPORTED_UPLOAD_EXTENSIONS, MAX_UPLOAD_SIZE
+from core.file_utils import (
+    get_file_type,
+    is_tabular,
+    validate_watch_folder_path,
+    get_relative_path,
+)
 from core.utils import generate_document_id, compute_file_hash
 from core.document_processor import document_processor
 from parsers import parser_registry
@@ -31,51 +37,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/files", tags=["Files"])
 
-# Supported file extensions for upload
-SUPPORTED_EXTENSIONS = {"pdf", "docx", "xlsx", "xls", "csv", "pptx"}
-MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100MB
-
-
-def _validate_path(path: str) -> Path:
-    """Validate and resolve a path, ensuring it's within the watch folder."""
-    # Normalize the path
-    if path in ("", ".", "/"):
-        return settings.watch_folder
-
-    # Remove leading slashes and normalize separators
-    path = path.lstrip("/\\")
-    # Replace forward slashes with OS separator for Windows compatibility
-    path = path.replace("/", os.sep)
-
-    # Resolve the full path
-    full_path = (settings.watch_folder / path).resolve()
-
-    # Security check: ensure path is within watch folder
-    try:
-        full_path.relative_to(settings.watch_folder.resolve())
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid path: path must be within documents folder"
-        )
-
-    return full_path
-
-
-def _get_relative_path(full_path: Path) -> str:
-    """Get the relative path from watch folder (always uses forward slashes)."""
-    try:
-        rel = full_path.resolve().relative_to(settings.watch_folder.resolve())
-        # Use forward slashes for cross-platform compatibility in URLs
-        return rel.as_posix()
-    except ValueError:
-        return ""
-
-
-def _get_file_type(file_path: Path) -> str:
-    """Get the file type from extension."""
-    return file_path.suffix.lower().lstrip(".")
-
 
 @router.get("/browse", response_model=FolderContents)
 @router.get("/browse/{path:path}", response_model=FolderContents)
@@ -85,7 +46,7 @@ async def browse_folder(path: str = "") -> FolderContents:
 
     Returns a list of files and subfolders in the specified path.
     """
-    folder_path = _validate_path(path)
+    folder_path = validate_watch_folder_path(path)
 
     if not folder_path.exists():
         raise HTTPException(status_code=404, detail="Folder not found")
@@ -99,7 +60,7 @@ async def browse_folder(path: str = "") -> FolderContents:
         for entry in sorted(folder_path.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
             try:
                 stat = entry.stat()
-                rel_path = _get_relative_path(entry)
+                rel_path = get_relative_path(entry)
 
                 if entry.is_dir():
                     items.append(FolderItem(
@@ -113,7 +74,7 @@ async def browse_folder(path: str = "") -> FolderContents:
                         modified_at=datetime.fromtimestamp(stat.st_mtime),
                     ))
                 else:
-                    file_type = _get_file_type(entry)
+                    file_type = get_file_type(entry)
                     is_supported = parser_registry.is_supported(entry)
 
                     # Get document record if exists
@@ -141,7 +102,7 @@ async def browse_folder(path: str = "") -> FolderContents:
         raise HTTPException(status_code=403, detail="Permission denied")
 
     # Calculate parent path
-    current_rel = _get_relative_path(folder_path)
+    current_rel = get_relative_path(folder_path)
     if current_rel and current_rel != ".":
         parent_path = str(Path(current_rel).parent)
         if parent_path == ".":
@@ -172,7 +133,7 @@ async def create_folder(request: CreateFolderRequest) -> CreateFolderResponse:
         )
 
     # Get parent path
-    parent_path = _validate_path(request.parent_path)
+    parent_path = validate_watch_folder_path(request.parent_path)
 
     if not parent_path.exists():
         raise HTTPException(status_code=404, detail="Parent folder not found")
@@ -188,7 +149,7 @@ async def create_folder(request: CreateFolderRequest) -> CreateFolderResponse:
 
     try:
         new_folder.mkdir(parents=False, exist_ok=False)
-        rel_path = _get_relative_path(new_folder)
+        rel_path = get_relative_path(new_folder)
         logger.info(f"Created folder: {rel_path}")
 
         return CreateFolderResponse(
@@ -211,7 +172,7 @@ async def upload_files(
     Files will be automatically indexed by the file watcher.
     """
     # Validate target path
-    target_folder = _validate_path(target_path)
+    target_folder = validate_watch_folder_path(target_path)
 
     if not target_folder.exists():
         raise HTTPException(status_code=404, detail="Target folder not found")
@@ -225,8 +186,8 @@ async def upload_files(
     for file in files:
         try:
             # Validate file extension
-            file_ext = Path(file.filename).suffix.lower().lstrip(".")
-            if file_ext not in SUPPORTED_EXTENSIONS:
+            file_ext = get_file_type(Path(file.filename))
+            if file_ext not in SUPPORTED_UPLOAD_EXTENSIONS:
                 failed.append(f"{file.filename}: Unsupported file type")
                 continue
 
@@ -249,7 +210,7 @@ async def upload_files(
             with open(dest_path, "wb") as f:
                 f.write(content)
 
-            rel_path = _get_relative_path(dest_path)
+            rel_path = get_relative_path(dest_path)
             uploaded.append(rel_path)
             logger.info(f"Uploaded file: {rel_path}")
 
@@ -261,7 +222,7 @@ async def upload_files(
                     document_id=doc_id,
                     file_path=str(dest_path.absolute()),
                     file_name=dest_path.name,
-                    file_type=_get_file_type(dest_path),
+                    file_type=get_file_type(dest_path),
                     file_hash=file_hash,
                 )
                 logger.info(f"Registered document for processing: {doc_id}")
@@ -288,7 +249,7 @@ async def download_file(path: str):
 
     Returns the file as a downloadable attachment.
     """
-    file_path = _validate_path(path)
+    file_path = validate_watch_folder_path(path)
 
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -310,7 +271,7 @@ async def preview_file(path: str) -> FilePreview:
 
     Returns file content for preview (text for documents, table data for spreadsheets).
     """
-    file_path = _validate_path(path)
+    file_path = validate_watch_folder_path(path)
 
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -319,7 +280,7 @@ async def preview_file(path: str) -> FilePreview:
         raise HTTPException(status_code=400, detail="Path is not a file")
 
     stat = file_path.stat()
-    file_type = _get_file_type(file_path)
+    file_type = get_file_type(file_path)
 
     # Get document record if exists
     doc_id = generate_document_id(file_path)
@@ -337,7 +298,7 @@ async def preview_file(path: str) -> FilePreview:
     content = None
     content_type = "binary"
 
-    if file_type in ("csv", "xlsx", "xls"):
+    if is_tabular(file_type):
         content_type = "table"
         try:
             import pandas as pd
@@ -377,7 +338,7 @@ async def preview_file(path: str) -> FilePreview:
 
     return FilePreview(
         name=file_path.name,
-        path=_get_relative_path(file_path),
+        path=get_relative_path(file_path),
         file_type=file_type,
         size=stat.st_size,
         content_type=content_type,
@@ -397,7 +358,7 @@ async def delete_file(path: str) -> DeleteResponse:
 
     Removes the file and its index/processing entries.
     """
-    file_path = _validate_path(path)
+    file_path = validate_watch_folder_path(path)
 
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -405,7 +366,7 @@ async def delete_file(path: str) -> DeleteResponse:
     if not file_path.is_file():
         raise HTTPException(status_code=400, detail="Path is not a file")
 
-    rel_path = _get_relative_path(file_path)
+    rel_path = get_relative_path(file_path)
 
     doc_id = generate_document_id(file_path)
     doc = await metadata_store.get_document(doc_id)
@@ -437,7 +398,7 @@ async def delete_folder(path: str, force: bool = Query(default=False)) -> Delete
 
     By default, only empty folders can be deleted. Use force=true to delete non-empty folders.
     """
-    folder_path = _validate_path(path)
+    folder_path = validate_watch_folder_path(path)
 
     if not folder_path.exists():
         raise HTTPException(status_code=404, detail="Folder not found")
@@ -449,7 +410,7 @@ async def delete_folder(path: str, force: bool = Query(default=False)) -> Delete
     if folder_path.resolve() == settings.watch_folder.resolve():
         raise HTTPException(status_code=400, detail="Cannot delete root documents folder")
 
-    rel_path = _get_relative_path(folder_path)
+    rel_path = get_relative_path(folder_path)
 
     # Check if folder is empty
     contents = list(folder_path.iterdir())

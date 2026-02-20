@@ -288,25 +288,5 @@ class ChunkEnricher:
         )
 
 
-async def enrich_document_chunks(
-    chunks: list[Chunk],
-    doc_context: dict[str, Any] | None = None,
-    llm_client: LLMClient | None = None,
-) -> list[tuple[ChunkMetadata, list[ChunkQuestion]]]:
-    """
-    Convenience function to enrich all chunks for a document.
-
-    Args:
-        chunks: List of chunks to enrich
-        doc_context: Optional document-level context
-        llm_client: Optional LLM client instance
-
-    Returns:
-        List of (ChunkMetadata, list of ChunkQuestion) tuples
-    """
-    enricher = ChunkEnricher(llm_client=llm_client)
-    return await enricher.enrich_batch(chunks, doc_context)
-
-
 # Global enricher instance
 chunk_enricher = ChunkEnricher()

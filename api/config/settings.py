@@ -129,46 +129,32 @@ class Settings(BaseSettings):
     # Database
     database_path: Path = Path("./data/sqlite/metadata.db")
 
-    @property
-    def faiss_index_path(self) -> Path:
-        return self.data_folder / "faiss" / "index.faiss"
+    # -- Index / cache path helpers ------------------------------------------
 
-    @property
-    def faiss_id_map_path(self) -> Path:
-        return self.data_folder / "faiss" / "id_map.json"
+    def index_path(self, name: str) -> Path:
+        """Return path for a named index file.
 
+        Convention:
+        - FAISS indices live under ``data/faiss/<name>``
+        - BM25 index lives under ``data/bm25/<name>``
+        - Cache lives under ``data/cache/<name>``
+
+        Examples::
+
+            settings.index_path("main_index.faiss")
+            settings.index_path("bm25/index.pkl")
+            settings.index_path("cache/semantic_cache.pkl")
+        """
+        return self.data_folder / name
+
+    # Convenience properties (kept for readability at call sites)
     @property
     def bm25_index_path(self) -> Path:
-        return self.data_folder / "bm25" / "index.pkl"
+        return self.index_path("bm25/index.pkl")
 
     @property
     def cache_path(self) -> Path:
-        return self.data_folder / "cache" / "semantic_cache.pkl"
-
-    # Multi-vector index paths
-    @property
-    def main_vector_index_path(self) -> Path:
-        return self.data_folder / "faiss" / "main_index.faiss"
-
-    @property
-    def main_vector_id_map_path(self) -> Path:
-        return self.data_folder / "faiss" / "main_id_map.json"
-
-    @property
-    def summary_vector_index_path(self) -> Path:
-        return self.data_folder / "faiss" / "summary_index.faiss"
-
-    @property
-    def summary_vector_id_map_path(self) -> Path:
-        return self.data_folder / "faiss" / "summary_id_map.json"
-
-    @property
-    def question_vector_index_path(self) -> Path:
-        return self.data_folder / "faiss" / "question_index.faiss"
-
-    @property
-    def question_vector_id_map_path(self) -> Path:
-        return self.data_folder / "faiss" / "question_id_map.json"
+        return self.index_path("cache/semantic_cache.pkl")
 
     @property
     def multi_vector_weights(self) -> dict[str, float]:

@@ -100,6 +100,7 @@ class EnhancedHybridSearch:
         document_id: str | None = None,
         query_type: str | None = None,
         query_embedding: np.ndarray | None = None,
+        preferred_categories: list[str] | None = None,
     ) -> EnhancedSearchResult:
         """
         Execute enhanced hybrid search with multi-vector retrieval.
@@ -145,6 +146,11 @@ class EnhancedHybridSearch:
                         doc_chunks = await metadata_store.get_chunks_by_document(doc_id)
                         chunks.extend(doc_chunks)
                     filter_chunk_ids = [c.id for c in chunks]
+
+            # Apply chunk-level entity filters (intersects with existing filter)
+            filter_chunk_ids = await self._apply_chunk_entity_filters(
+                filters, filter_chunk_ids
+            )
         logger.info(f"[Latency] filters: {(time.time() - t0) * 1000:.0f}ms")
 
         # Phase 2: Run HyDE and BM25 in parallel
@@ -173,9 +179,9 @@ class EnhancedHybridSearch:
             debug_info.hyde_hypothetical = hypothetical_text
 
         # Vector search with final embedding (HyDE-enhanced or raw)
-        # Phase 7: search_all runs 3 FAISS indices in parallel internally
+        # Runs 3 FAISS indices in parallel internally via thread pool
         t_faiss = time.time()
-        vector_results = multi_vector_index.search_all(
+        vector_results = multi_vector_index.search(
             final_embedding,
             k=search_k,
             filter_ids=filter_chunk_ids,
@@ -233,6 +239,10 @@ class EnhancedHybridSearch:
         if debug_info:
             debug_info.rrf_scores = rrf_details
 
+        # Apply category-based relevance boosting if preferred categories detected
+        if preferred_categories:
+            fused = await self._apply_category_boost(fused, preferred_categories)
+
         # Apply optional post-processing: re-ranking and/or MMR
         t0 = time.time()
         top_results = await self._apply_post_processing(
@@ -269,6 +279,12 @@ class EnhancedHybridSearch:
         results = []
         source_attribution: dict[str, list[SourceType]] = {}
 
+        # Pre-build source ID sets (avoids rebuilding per chunk)
+        main_ids = {cid for cid, _ in main_results}
+        summary_ids = {cid for cid, _ in summary_results}
+        question_ids = {cid for cid, _ in question_results}
+        bm25_ids = {cid for cid, _ in bm25_results}
+
         for chunk_id in top_chunk_ids:
             chunk = chunks_map.get(chunk_id)
             if not chunk:
@@ -280,9 +296,11 @@ class EnhancedHybridSearch:
             score = top_scores[chunk_id]
             highlights = self._create_highlights(chunk.text, query)
 
-            # Get temporal_context from chunk metadata if available
+            # Get enriched metadata from chunk metadata if available
             meta = chunk_meta_map.get(chunk.id)
             temporal_ctx = meta.temporal_context if meta else None
+            chunk_title = meta.title if meta else None
+            chunk_keywords = meta.keywords if meta else []
 
             result_item = SearchResultItem(
                 document_id=document.id,
@@ -298,17 +316,21 @@ class EnhancedHybridSearch:
                 highlights=highlights,
                 entities=chunk.entities,
                 temporal_context=temporal_ctx,
+                chunk_title=chunk_title,
+                chunk_keywords=chunk_keywords,
             )
             results.append(result_item)
 
-            # Track source attribution
-            sources = self._get_sources(
-                chunk_id,
-                main_results,
-                summary_results,
-                question_results,
-                bm25_results,
-            )
+            # Track source attribution from pre-built sets
+            sources: list[SourceType] = []
+            if chunk_id in main_ids:
+                sources.append("main_vector")
+            if chunk_id in summary_ids:
+                sources.append("summary_vector")
+            if chunk_id in question_ids:
+                sources.append("question_vector")
+            if chunk_id in bm25_ids:
+                sources.append("bm25")
             source_attribution[chunk_id] = sources
         logger.info(f"[Latency] result_building: {(time.time() - t0) * 1000:.0f}ms")
 
@@ -439,32 +461,41 @@ class EnhancedHybridSearch:
 
         return sorted_results, details
 
-    def _get_sources(
+    async def _apply_category_boost(
         self,
-        chunk_id: str,
-        main_results: list[tuple[str, float]],
-        summary_results: list[tuple[str, float]],
-        question_results: list[tuple[str, float]],
-        bm25_results: list[tuple[str, float]],
-    ) -> list[SourceType]:
-        """Determine which sources contributed to finding a chunk."""
-        sources: list[SourceType] = []
+        fused_results: list[tuple[str, float]],
+        preferred_categories: list[str],
+        boost_factor: float = 1.3,
+    ) -> list[tuple[str, float]]:
+        """Boost scores for chunks whose category matches the query intent.
 
-        main_ids = {cid for cid, _ in main_results}
-        summary_ids = {cid for cid, _ in summary_results}
-        question_ids = {cid for cid, _ in question_results}
-        bm25_ids = {cid for cid, _ in bm25_results}
+        Args:
+            fused_results: RRF-fused results
+            preferred_categories: Categories to boost (e.g., ["procedure", "definition"])
+            boost_factor: Multiplier for matching chunks (default 1.3 = 30% boost)
 
-        if chunk_id in main_ids:
-            sources.append("main_vector")
-        if chunk_id in summary_ids:
-            sources.append("summary_vector")
-        if chunk_id in question_ids:
-            sources.append("question_vector")
-        if chunk_id in bm25_ids:
-            sources.append("bm25")
+        Returns:
+            Re-scored and re-sorted results
+        """
+        if not preferred_categories or not fused_results:
+            return fused_results
 
-        return sources
+        # Batch fetch metadata for top candidates only (limit to avoid large DB queries)
+        candidate_ids = [cid for cid, _ in fused_results[:50]]
+        chunk_meta_map = await metadata_store.get_chunk_metadata_batch(candidate_ids)
+
+        preferred_set = set(preferred_categories)
+        boosted = []
+        for chunk_id, score in fused_results:
+            meta = chunk_meta_map.get(chunk_id)
+            if meta and meta.category and meta.category in preferred_set:
+                boosted.append((chunk_id, score * boost_factor))
+            else:
+                boosted.append((chunk_id, score))
+
+        # Re-sort by boosted score
+        boosted.sort(key=lambda x: x[1], reverse=True)
+        return boosted
 
     async def _apply_filters(self, filters: dict[str, Any]) -> list[str] | None:
         """Apply filters and return matching document IDs."""
@@ -475,7 +506,7 @@ class EnhancedHybridSearch:
             type_ids = await metadata_store.filter_documents_by_type(filters["doc_type"])
             candidate_ids = set(type_ids)
 
-        # Filter by entities
+        # Filter by document-level entities
         if "entities" in filters and filters["entities"]:
             for key, value in filters["entities"].items():
                 entity_ids = await metadata_store.filter_documents_by_entity(key, value)
@@ -485,6 +516,38 @@ class EnhancedHybridSearch:
                     candidate_ids &= set(entity_ids)
 
         return list(candidate_ids) if candidate_ids is not None else None
+
+    async def _apply_chunk_entity_filters(
+        self, filters: dict[str, Any], existing_chunk_ids: list[str] | None
+    ) -> list[str] | None:
+        """Apply chunk-level entity filters and return matching chunk IDs.
+
+        Args:
+            filters: Filter dict, expects "chunk_entities" key with {entity_key: entity_value}
+            existing_chunk_ids: Pre-existing chunk filter to intersect with
+
+        Returns:
+            Filtered chunk IDs or None if no chunk_entities filter present
+        """
+        if "chunk_entities" not in filters or not filters["chunk_entities"]:
+            return existing_chunk_ids
+
+        chunk_candidate_ids = None
+        for key, value in filters["chunk_entities"].items():
+            matched_ids = await metadata_store.filter_chunks_by_entity(key, value)
+            if chunk_candidate_ids is None:
+                chunk_candidate_ids = set(matched_ids)
+            else:
+                chunk_candidate_ids &= set(matched_ids)
+
+        if chunk_candidate_ids is None:
+            return existing_chunk_ids
+
+        # Intersect with existing chunk filter if present
+        if existing_chunk_ids is not None:
+            chunk_candidate_ids &= set(existing_chunk_ids)
+
+        return list(chunk_candidate_ids) if chunk_candidate_ids else existing_chunk_ids
 
     def _create_highlights(self, text: str, query: str) -> list[str]:
         """Create highlighted snippets showing query matches."""

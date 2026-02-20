@@ -65,9 +65,9 @@ class MMRSelector:
 
         lambda_val = lambda_param if lambda_param is not None else self.lambda_param
 
-        # Embed all candidate texts
+        # Embed all candidate texts in a single batch call
         texts = [text for _, _, text in results]
-        doc_embeddings = np.array([embedder.embed(text) for text in texts])
+        doc_embeddings = embedder.embed_batch(texts)
 
         # Normalize embeddings
         query_norm = query_embedding / (np.linalg.norm(query_embedding) + 1e-9)

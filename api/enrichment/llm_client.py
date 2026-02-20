@@ -239,36 +239,37 @@ class GeminiClient(LLMClient):
             raise
 
 
-def get_llm_client() -> LLMClient:
-    """Factory function to get the configured LLM client."""
-    if settings.llm_provider == "openai":
-        return OpenAIClient()
-    elif settings.llm_provider == "gemini":
-        return GeminiClient()
-    else:
-        raise ValueError(f"Unknown LLM provider: {settings.llm_provider}")
+def get_llm_client(purpose: str = "default") -> LLMClient:
+    """Factory for LLM clients.
 
+    Args:
+        purpose: ``"default"``, ``"enrichment"``, or ``"synthesis"``.
+                 When *enrichment* or *synthesis* is requested the
+                 corresponding model override from settings is used.
+    """
+    model_overrides: dict[str, str | None] = {
+        "enrichment": settings.enrichment_model or None,
+        "synthesis": settings.synthesis_model or None,
+    }
+    model = model_overrides.get(purpose)  # None for "default"
 
-def get_enrichment_llm_client() -> LLMClient:
-    """Get LLM client configured for chunk enrichment."""
-    model = settings.enrichment_model or None
     if settings.llm_provider == "openai":
         return OpenAIClient(model=model)
     elif settings.llm_provider == "gemini":
         return GeminiClient(model=model)
     else:
         raise ValueError(f"Unknown LLM provider: {settings.llm_provider}")
+
+
+# Thin wrappers kept for backward-compatible call sites
+def get_enrichment_llm_client() -> LLMClient:
+    """Shorthand for ``get_llm_client("enrichment")``."""
+    return get_llm_client("enrichment")
 
 
 def get_synthesis_llm_client() -> LLMClient:
-    """Get LLM client configured for response synthesis."""
-    model = settings.synthesis_model or None
-    if settings.llm_provider == "openai":
-        return OpenAIClient(model=model)
-    elif settings.llm_provider == "gemini":
-        return GeminiClient(model=model)
-    else:
-        raise ValueError(f"Unknown LLM provider: {settings.llm_provider}")
+    """Shorthand for ``get_llm_client("synthesis")``."""
+    return get_llm_client("synthesis")
 
 
 # Default client instance

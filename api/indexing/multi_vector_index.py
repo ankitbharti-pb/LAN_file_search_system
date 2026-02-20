@@ -180,30 +180,6 @@ class MultiVectorIndex:
 
         return results
 
-    def search_all(
-        self,
-        query_embedding: np.ndarray,
-        k: int = 10,
-        filter_ids: list[str] | None = None,
-    ) -> dict[VectorType, list[tuple[str, float]]]:
-        """
-        Search all indices and return results.
-
-        Args:
-            query_embedding: Query embedding
-            k: Number of results per index
-            filter_ids: Optional chunk IDs to filter results
-
-        Returns:
-            Dict with results from all indices
-        """
-        return self.search(
-            query_embedding,
-            k=k,
-            vector_types=["main", "summary", "question"],
-            filter_ids=filter_ids,
-        )
-
     def remove_chunk(self, chunk_id: str) -> None:
         """
         Remove all embeddings for a chunk from all indices.
@@ -229,6 +205,19 @@ class MultiVectorIndex:
 
         logger.debug(f"Removed chunk {chunk_id} from all indices")
 
+    def _resolve_paths(self, base_path: Path | None = None) -> dict[str, Path]:
+        """Resolve index file paths from a base path or settings defaults."""
+        bp = base_path or settings.data_folder / "faiss"
+        return {
+            "main_index": bp / "main_index.faiss",
+            "main_id_map": bp / "main_id_map.json",
+            "summary_index": bp / "summary_index.faiss",
+            "summary_id_map": bp / "summary_id_map.json",
+            "question_index": bp / "question_index.faiss",
+            "question_id_map": bp / "question_id_map.json",
+            "question_chunk_map": bp / "question_chunk_map.json",
+        }
+
     def save(self, base_path: Path | None = None) -> None:
         """
         Save all indices to disk.
@@ -236,35 +225,16 @@ class MultiVectorIndex:
         Args:
             base_path: Base path for index files (uses settings default if not provided)
         """
-        if base_path:
-            main_index_path = base_path / "main_index.faiss"
-            main_id_map_path = base_path / "main_id_map.json"
-            summary_index_path = base_path / "summary_index.faiss"
-            summary_id_map_path = base_path / "summary_id_map.json"
-            question_index_path = base_path / "question_index.faiss"
-            question_id_map_path = base_path / "question_id_map.json"
-        else:
-            main_index_path = settings.main_vector_index_path
-            main_id_map_path = settings.main_vector_id_map_path
-            summary_index_path = settings.summary_vector_index_path
-            summary_id_map_path = settings.summary_vector_id_map_path
-            question_index_path = settings.question_vector_index_path
-            question_id_map_path = settings.question_vector_id_map_path
+        import json
+        paths = self._resolve_paths(base_path)
 
-        # Save main index
-        self.main_index.save(main_index_path, main_id_map_path)
-
-        # Save summary index
-        self.summary_index.save(summary_index_path, summary_id_map_path)
-
-        # Save question index
-        self.question_index.save(question_index_path, question_id_map_path)
+        self.main_index.save(paths["main_index"], paths["main_id_map"])
+        self.summary_index.save(paths["summary_index"], paths["summary_id_map"])
+        self.question_index.save(paths["question_index"], paths["question_id_map"])
 
         # Save question-to-chunk mapping
-        import json
-        mapping_path = (base_path or settings.data_folder / "faiss") / "question_chunk_map.json"
-        mapping_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(mapping_path, "w") as f:
+        paths["question_chunk_map"].parent.mkdir(parents=True, exist_ok=True)
+        with open(paths["question_chunk_map"], "w") as f:
             json.dump(self._question_to_chunk, f)
 
         logger.info("Saved all multi-vector indices")
@@ -280,34 +250,14 @@ class MultiVectorIndex:
             True if all indices loaded successfully
         """
         import json
+        paths = self._resolve_paths(base_path)
 
-        if base_path:
-            main_index_path = base_path / "main_index.faiss"
-            main_id_map_path = base_path / "main_id_map.json"
-            summary_index_path = base_path / "summary_index.faiss"
-            summary_id_map_path = base_path / "summary_id_map.json"
-            question_index_path = base_path / "question_index.faiss"
-            question_id_map_path = base_path / "question_id_map.json"
-            mapping_path = base_path / "question_chunk_map.json"
-        else:
-            main_index_path = settings.main_vector_index_path
-            main_id_map_path = settings.main_vector_id_map_path
-            summary_index_path = settings.summary_vector_index_path
-            summary_id_map_path = settings.summary_vector_id_map_path
-            question_index_path = settings.question_vector_index_path
-            question_id_map_path = settings.question_vector_id_map_path
-            mapping_path = settings.data_folder / "faiss" / "question_chunk_map.json"
-
-        # Load main index
-        main_loaded = self.main_index.load(main_index_path, main_id_map_path)
-
-        # Load summary index
-        summary_loaded = self.summary_index.load(summary_index_path, summary_id_map_path)
-
-        # Load question index
-        question_loaded = self.question_index.load(question_index_path, question_id_map_path)
+        main_loaded = self.main_index.load(paths["main_index"], paths["main_id_map"])
+        summary_loaded = self.summary_index.load(paths["summary_index"], paths["summary_id_map"])
+        question_loaded = self.question_index.load(paths["question_index"], paths["question_id_map"])
 
         # Load question-to-chunk mapping
+        mapping_path = paths["question_chunk_map"]
         if mapping_path.exists():
             try:
                 with open(mapping_path, "r") as f:
